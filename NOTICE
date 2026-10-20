@@ -1,0 +1,19 @@
+mesa-symbian: the Symbian port of Mesa
+Copyright The Phorepoc Authors (see AUTHORS)
+
+Phorepoc was founded by Kyriakos Bompotis.
+
+This repository ports Mesa (https://mesa3d.org, https://gitlab.freedesktop.org/mesa/mesa) to Symbian. Mesa itself is
+not copied here: build.sh fetches the version pinned in mesa.lock, and Mesa keeps its own licences (mostly MIT; see
+docs/license.rst in Mesa). Thanks to the Mesa developers.
+
+Three files are adapted from Mesa's Haiku support and keep their authors' copyright (MIT):
+  symbian/src/egl_symbian.c   from src/egl/drivers/haiku/egl_haiku.cpp, Copyright (C) 2014 Adrián Arroyo Calle
+  symbian/src/sym_frontend.c  from src/gallium/frontends/hgl/hgl.c, Copyright 2012-2014 Haiku, Inc.
+                              (authors Artur Wyszynski, Alexander von Gluck IV)
+  symbian/src/sym_winsys.c    from src/gallium/winsys/sw/hgl/hgl_sw_winsys.cpp, Copyright 2009 Artur Wyszynski,
+                              Copyright 2013-2014 Alexander von Gluck IV
+Thanks to the Haiku project, whose port showed the way.
+
+Everything here is under the MIT licence (LICENSE). The Symbian headers and libraries it compiles against are the
+Symbian Foundation's (EPL-1.0) and come from the Phorepoc core repository.
