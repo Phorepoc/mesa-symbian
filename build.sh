@@ -39,7 +39,9 @@ if [ ! -f "$HOST/compile_commands.json" ]; then
     -Dlibunwind=disabled -Dbuild-tests=false -Dlmsensors=disabled -Ddisplay-info=disabled -Dgallium-va=disabled \
     -Dvideo-codecs= -Dtools=
 fi
-ninja -C "$HOST"
+# every static library (not just the default targets: with no frontend configured, meson leaves libmesa, libglsl ...
+# out of "all"), so all the generated sources and headers the Symbian build compiles against exist
+ninja -C "$HOST" $(ninja -C "$HOST" -t targets all | awk -F: '$1 ~ /\.a$/ {print $1}')
 
 python3 "$HERE/build_mesa_symbian.py" "$@"
 python3 "$HERE/gen_gl_fronts.py"

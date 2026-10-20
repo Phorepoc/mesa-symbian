@@ -256,11 +256,21 @@ GLOBAL_DROP = {
     "HAVE_RENDERDOC_INTEGRATION", "USE_DRICONF", "SYSCONFDIR", "DATADIR",
 }
 
-GCC_VER = "13.2.1"
-CXX_INC = [f"/usr/lib/arm-none-eabi/include/c++/{GCC_VER}",
-           f"/usr/lib/arm-none-eabi/include/c++/{GCC_VER}/arm-none-eabi/thumb/v7-a+fp/softfp",
-           f"/usr/lib/arm-none-eabi/include/c++/{GCC_VER}/arm-none-eabi",
-           f"/usr/lib/arm-none-eabi/include/c++/{GCC_VER}/backward"]
+def _cxx_incs() -> list[str]:
+    """the arm-none-eabi libstdc++ header dirs for the armv7-a softfp multilib, as the compiler itself reports them
+    (Ubuntu's packaged toolchain and ARM's own put them in different places, under different GCC versions)"""
+    r = subprocess.run(["arm-none-eabi-g++", "-march=armv7-a", "-mthumb", "-mfloat-abi=softfp", "-mfpu=vfpv3-d16",
+                        "-x", "c++", "-E", "-v", "-"], input="", capture_output=True, text=True)
+    lines = r.stderr.splitlines()
+    try:
+        a = lines.index("#include <...> search starts here:") + 1
+        b = lines.index("End of search list.")
+    except ValueError:
+        return []
+    return [os.path.normpath(l.strip()) for l in lines[a:b] if "c++" in l]
+
+
+CXX_INC = _cxx_incs()
 
 
 def base_flags() -> list[str]:
