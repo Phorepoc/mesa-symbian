@@ -18,4 +18,4 @@ Thanks to the Haiku project, whose port showed the way.
 Everything here is under the MIT licence (LICENSE). The Symbian headers and libraries it compiles against are the
 Symbian Foundation's (EPL-1.0, or EPL-2.0 with GPL-2.0-or-later as a Secondary License where Phorepoc updated them) and come from the Phorepoc core repository.
 
-The Nokia-derived files in this repo are our updated versions, distributed under EPL-2.0 with GPL-2.0-or-later as a Secondary License (relicensed from EPL-1.0 under its section 7); see LICENSES/EPL-2.0.txt.
+Our own file gen_gl_fronts.py (and the front sources it generates) is Apache-2.0 (LICENSES/Apache-2.0.txt). The Nokia-derived files in this repo are our updated versions, distributed under EPL-2.0 with GPL-2.0-or-later as a Secondary License (relicensed from EPL-1.0 under its section 7); see LICENSES/EPL-2.0.txt.
