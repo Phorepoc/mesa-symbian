@@ -136,6 +136,9 @@ PATCH = {
     # lima's few OS calls that are not drmIoctl: imported-buffer size (lseek on a dma-buf), BO CPU mappings (mmap of
     # the DRM fd), closing sync files -- all routed to the shim (symbian/src/drm_symbian.c, symbian/include/xf86drm.h)
     "liblima": {
+        "lima_draw.c": [('#include "lima_job.h"\n', '#include "lima_job.h"\n#include "util/log.h"\n'),
+                        ('      struct pipe_vertex_buffer *pvb = vb->vb + pve->vertex_buffer_index;\n      struct lima_resource *res = lima_resource(pvb->buffer.resource);\n\n      lima_job_add_bo(job, LIMA_PIPE_GP, res->bo, LIMA_SUBMIT_BO_READ);\n',
+                         '      struct pipe_vertex_buffer *pvb = vb->vb + pve->vertex_buffer_index;\n      struct lima_resource *res = lima_resource(pvb->buffer.resource);\n\n      if (!res) {\n         /* OURS (Symbian): a vertex element whose buffer slot holds no resource (Dungeon Hunter 2, GLES1: user crash at\n          * lima_draw.c, release build has the asserts above compiled out). Point the attribute at the (always valid)\n          * vertex shader BO with stride 0 instead of dereferencing NULL. */\n         static unsigned lima_null_vb_warned;\n         if (!lima_null_vb_warned++)\n            mesa_loge("lima: draw with an empty vertex buffer slot %u (count %u, mask %x): attribute %d dropped",\n                      pve->vertex_buffer_index, vb->count, vb->enabled_mask, i);\n         attribute[n++] = ctx->vs->bo->va;\n         attribute[n++] = (lima_pipe_format_to_attrib_type(pve->src_format) << 2) |\n            (util_format_get_nr_components(pve->src_format) - 1);\n         continue;\n      }\n\n      lima_job_add_bo(job, LIMA_PIPE_GP, res->bo, LIMA_SUBMIT_BO_READ);\n')],
         "lima_bo.c": [("      size = lseek(h, 0, SEEK_END);", "      size = sym_drm_fd_size(h);"),
                       ("      lseek(h, 0, SEEK_SET);\n", ""),
                       ("      bo->map = os_mmap(0, bo->size, PROT_READ | PROT_WRITE,\n"
