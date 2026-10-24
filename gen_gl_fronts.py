@@ -50,7 +50,7 @@ ORD_BASE = {"egl": 0, "gles2": 100, "gles1": 400}
 
 def read_def(path: str) -> list[tuple[int, str]]:
     out = []
-    for line in open(path, encoding="latin-1"):
+    for line in open(fold(path), encoding="latin-1"):
         m = re.match(r"\s*(\w+)\s*@\s*(\d+)\s*NONAME(.*)", line)
         if m and "ABSENT" not in m.group(3):
             out.append((int(m.group(2)), m.group(1)))
@@ -61,11 +61,24 @@ PROTO = re.compile(r"(?:EGLAPI|GL_APICALL|GL_API)\s+([^;#\n]*?)\s*(?:EGLAPIENTRY
                    re.S)
 
 
+def fold(path: str) -> str:
+    """path with each component matched case-insensitively (the Public_API tree spells one folder two ways, GLES/ and
+    gles/: one folder on Windows, two on Linux)"""
+    if os.path.exists(path):
+        return path
+    head, tail = os.path.split(path)
+    head = fold(head) if head and head != path else head
+    for name in os.listdir(head or "."):
+        if name.lower() == tail.lower() and os.path.exists(os.path.join(head, name)):
+            return os.path.join(head, name)
+    return os.path.join(head, tail)
+
+
 def read_protos(paths: list[str]) -> dict[str, tuple[str, str, bool]]:
     """name -> (return type, argument list text, softfp)"""
     out = {}
     for p in paths:
-        text = open(p, encoding="latin-1").read()
+        text = open(fold(p), encoding="latin-1").read()
         text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
         text = re.sub(r"^\s*#.*$", "", text, flags=re.M)      # preprocessor lines (a #define can mention EGLAPI)
         for m in PROTO.finditer(text):
