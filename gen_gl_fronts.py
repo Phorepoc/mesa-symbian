@@ -63,15 +63,28 @@ PROTO = re.compile(r"(?:EGLAPI|GL_APICALL|GL_API)\s+([^;#\n]*?)\s*(?:EGLAPIENTRY
 
 def fold(path: str) -> str:
     """path with each component matched case-insensitively (the Public_API tree spells one folder two ways, GLES/ and
-    gles/: one folder on Windows, two on Linux)"""
+    gles/: one folder on Windows, two on Linux -- every spelling is tried)"""
     if os.path.exists(path):
         return path
     head, tail = os.path.split(path)
-    head = fold(head) if head and head != path else head
-    for name in os.listdir(head or "."):
-        if name.lower() == tail.lower() and os.path.exists(os.path.join(head, name)):
-            return os.path.join(head, name)
-    return os.path.join(head, tail)
+    if not tail or head == path:
+        return path
+    for d in folds(head):
+        for name in os.listdir(d):
+            if name.lower() == tail.lower():
+                return os.path.join(d, name)
+    return path
+
+
+def folds(path: str) -> list[str]:
+    """every existing directory whose path matches path case-insensitively"""
+    head, tail = os.path.split(path)
+    if not tail or head == path:
+        return [path] if os.path.isdir(path) else []
+    out = []
+    for d in folds(head):
+        out += [os.path.join(d, n) for n in os.listdir(d) if n.lower() == tail.lower() and os.path.isdir(os.path.join(d, n))]
+    return out
 
 
 def read_protos(paths: list[str]) -> dict[str, tuple[str, str, bool]]:
