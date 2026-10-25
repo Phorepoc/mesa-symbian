@@ -1,38 +1,36 @@
 # mesa-symbian
 
-[Mesa](https://mesa3d.org) ported to Symbian for [Phorepoc](https://github.com/Phorepoc): OpenGL ES 1.1 / 2.0 and EGL,
-rendered by Mesa's softpipe on any board, or by the Mali-400 (Mesa's lima driver) on the Allwinner A64.
+This is [Mesa](https://mesa3d.org) on Symbian. It gives [Phorepoc](https://github.com/Phorepoc) OpenGL ES 1.1 and 2.0
+with EGL, so 3D games and apps run. On the PinePhone it draws with the Mali-400 GPU through Mesa's lima driver, and on
+any other board it falls back to softpipe, Mesa's software renderer.
 
-Mesa is not copied here. This repository holds what Symbian needs on top of it and the recipe that builds it:
+We don't keep a copy of Mesa here. The build downloads the release named in `mesa.lock` (26.2.4 at the moment) and
+compiles it for Symbian. This repository holds the parts Symbian needs on top:
 
-| path | what |
-|---|---|
-| `symbian/src/` | the Symbian EGL driver, gallium winsys and frontend; the DRM uAPI emulation lima talks to; POSIX and C runtime gaps |
-| `symbian/include/` | the headers Mesa expects from a POSIX system (`pthread.h`, `xf86drm.h` ...) |
-| `symbian/mesa_symbian.h` | force-included into every Mesa file: the OS facts Mesa's `detect_os.h` cannot find |
-| `build_mesa_symbian.py` | recompiles each needed Mesa source file for ARM Symbian, from a host build's `compile_commands.json` |
-| `gen_gl_fronts.py` | the `libEGL` / `libGLESv2` / `libGLESv1_CM` fronts over `phgl.dll`, at the 2010 ordinals |
-| `mesa.lock` | the Mesa release this builds (26.2.4) |
-| `build.sh` | all of it, start to end |
+- `symbian/src/` has the EGL driver, the glue between Mesa and Symbian's windows, and a small emulation of the Linux
+  GPU interface that lima expects to talk to.
+- `symbian/include/` has the POSIX headers Mesa assumes are there, like `pthread.h` and `xf86drm.h`.
+- `build_mesa_symbian.py` compiles each Mesa source file Symbian needs, and `gen_gl_fronts.py` generates the
+  `libEGL`, `libGLESv2` and `libGLESv1_CM` libraries apps link against.
 
-The other half is in [core](https://github.com/Phorepoc/core): `phgl.dll`, which links these archives, and the
-`symgl` window-surface code with the GPU channel seam (`symmali.h`, `symgl_native.h`). A board with a GPU brings its own
-channel ([adaptation-a64](https://github.com/Phorepoc/adaptation-a64): the Mali-400).
+The rest of the GL stack lives in [core](https://github.com/Phorepoc/core). That's `phgl.dll`, which these libraries are
+linked into, and the code that connects GL surfaces to the screen. The Mali driver itself is in
+[adaptation-a64](https://github.com/Phorepoc/adaptation-a64).
 
 ## Building
 
-Inside the toolchain's mesa image, with core and the [pdk](https://github.com/Phorepoc/pdk) checked out next to this
-repository and the include tree exported (`ph source export -a`):
+Check out core and the [pdk](https://github.com/Phorepoc/pdk) next to this repository and run `ph source export -a`
+once. Then build in the toolchain's Mesa image:
 
 ```sh
-docker run --rm -v "$PWD/..:/src" -w /src/mesa-symbian ghcr.io/phorepoc/mesa ./build.sh
+docker run --rm -v "$PWD/..:/src" -w /src/mesa-symbian ghcr.io/phorepoc/mesa bash build.sh
 ```
 
-Output: `core/build/mesa-build/arm/*.a`, and the generated fronts in `core/os/src/phgl/gen/`.
+The libraries end up in `core/build/mesa-build/arm/`, ready for the PinePhone build to pick up.
 
-## Licence
+## License
 
-MIT (see `LICENSE`), copyright The Phorepoc Authors (`AUTHORS`). Three files are adapted from Mesa's Haiku support and
-keep their authors' copyright; `NOTICE` names them. Mesa itself keeps its own licences.
+Our code is MIT, like Mesa. Three files are adapted from Mesa's Haiku support and keep their authors' copyright, which
+`NOTICE` lists. Mesa itself keeps its own licenses.
 
-Contributions are welcome under the same terms: add yourself to `AUTHORS`.
+Contributions are welcome under the same terms. Add your name to `AUTHORS` in your first pull request.
