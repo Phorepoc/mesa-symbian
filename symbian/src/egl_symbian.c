@@ -25,7 +25,6 @@
 #include "eglsync.h"
 #include "egltypedefs.h"
 #include "c11/threads.h"
-void symmali_log(const char *msg);   /* symmali.cpp */
 #include "util/os_time.h"
 #include <time.h>
 
@@ -768,24 +767,9 @@ sym_wait_client(_EGLDisplay *disp, _EGLContext *c)
 {
    struct sym_egl_display *dpy = sym_egl_display(disp);
    struct sym_egl_context *ctx = sym_egl_context(c);
-   static int said;
-   if (said < 4) {
-      said++;
-      char m[96];
-      snprintf(m, sizeof m, "PH: [symegl] eglWaitClient ctx %p st %p fd %d", (void *)ctx, ctx ? (void *)ctx->st : NULL,
-               dpy ? dpy->fd : -9);
-      symmali_log(m);
-   }
    if (!ctx || !ctx->st)
       return EGL_TRUE;
-   /* the "before" half too, right ahead of the flush that submits the job: Mesa's eglWaitNative never reaches the
-    * driver for a SURFACELESS context (_eglWaitNativeCommon: no draw surface = EGL_BAD_CURRENT_SURFACE), so the G8
-    * composer's sources were cleaned only when their images were created -- reused images showed stale cache lines */
-   if (dpy->fd >= 0)
-      sym_ranges_sync(dpy->fd, 1);
-   sym_finish_context(dpy, ctx->st);
-   if (dpy->fd >= 0)
-      sym_ranges_sync(dpy->fd, 0);   /* the GPU wrote them, the CPU will read (sources are left alone) */
+   sym_finish_context(dpy, ctx->st);   /* the cache maintenance rides on the jobs (sym_sync_hook) */
    return EGL_TRUE;
 }
 
@@ -797,6 +781,17 @@ sym_wait_native(EGLint engine)
    if (dpy && dpy->fd >= 0)
       sym_ranges_sync(dpy->fd, 1);   /* the CPU wrote them, the GPU will read/write (sources: clean only) */
    return EGL_TRUE;
+}
+
+/* drm_symbian.c calls it around every PP job (sym_drm_sync_hook) */
+extern void (*sym_drm_sync_hook)(int before);
+static int sym_hook_fd = -1;
+
+static void
+sym_sync_hook(int before)
+{
+   if (sym_hook_fd >= 0)
+      sym_ranges_sync(sym_hook_fd, before);
 }
 
 static EGLBoolean
@@ -817,6 +812,8 @@ sym_initialize(_EGLDisplay *disp)
    }
    dpy->disp = sym_create_display(screen);
    dpy->ref_count = 1;
+   sym_hook_fd = dpy->fd;
+   sym_drm_sync_hook = sym_sync_hook;
    disp->DriverData = dpy;
 
    disp->ClientAPIs = EGL_OPENGL_ES_BIT | EGL_OPENGL_ES2_BIT;

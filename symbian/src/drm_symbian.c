@@ -102,6 +102,12 @@ dev_of(int fd)
 /* ---- the job timelines ------------------------------------------------------------------------------------- */
 
 /* the pipe's job in flight finishes (or, polling, is still running: 1) */
+/* egl_symbian.c's CPU cache maintenance of the registered images, tied to the jobs themselves: before = 1 right
+ * ahead of every PP submit (the CPU's writes reach memory), 0 once a PP job finished (the CPU drops what it cached of
+ * the GPU's output). EGL's eglWaitNative/eglWaitClient cannot carry it: they only reach the driver for a thread with a
+ * current EGL context and surface, and the G8 composer has neither (its sources showed stale lines for that). */
+void (*sym_drm_sync_hook)(int before);
+
 static int
 pipe_finish(struct dev *d, int pipe, int poll)
 {
@@ -111,6 +117,8 @@ pipe_finish(struct dev *d, int pipe, int poll)
    if (r == 1)
       return 1;
    d->completed[pipe] = d->submitted[pipe];
+   if (pipe == LIMA_PIPE_PP && sym_drm_sync_hook)
+      sym_drm_sync_hook(0);
    if (r != 0 && d->errors++ < 8)
       shimlog("[symdrm] %s job #%u failed: %d", pipe ? "PP" : "GP", d->completed[pipe], r);
    return 0;
@@ -403,6 +411,8 @@ gem_submit(struct dev *d, struct drm_lima_gem_submit *req)
          pipe_finish(d, other, 0);
    }
 
+   if (pipe == LIMA_PIPE_PP && sym_drm_sync_hook)
+      sym_drm_sync_hook(1);
    int r = symmali_submit(d->m, pipe, frame, words);
    if (r != 0) {
       shimlog("[symdrm] submit %s failed: %d", pipe ? "PP" : "GP", r);
