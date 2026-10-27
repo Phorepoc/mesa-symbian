@@ -319,6 +319,10 @@ struct sym_egl_image {
 static _EGLDisplay *sym_the_disp;
 
 static _EGLImage *sym_create_sgimage_image(_EGLDisplay *disp, EGLClientBuffer rsgimage, const EGLint *attr_list);
+/* G8: eglCreateImageKHR(EGL_SYMBIAN_MEMORY_IMAGE_PH, (symgl_sgimage*)desc) -- a sampler / render-target image over memory
+ * of this process that lies in a SHARED chunk (the composer's surface buffers), imported by address like an RSgImage */
+#define EGL_SYMBIAN_MEMORY_IMAGE_PH 0x3FF1
+static const EGLint sym_mem_attr_tag[] = {EGL_NONE};
 static int sym_range_add(int prime, uint32_t off, uint32_t size);
 
 static _EGLImage *
@@ -328,6 +332,8 @@ sym_create_image(_EGLDisplay *disp, _EGLContext *ctx, EGLenum target, EGLClientB
    (void)ctx;
    if (target == EGL_NATIVE_PIXMAP_KHR && dpy && dpy->fd >= 0)
       return sym_create_sgimage_image(disp, buffer, attr_list);
+   if (target == EGL_SYMBIAN_MEMORY_IMAGE_PH && dpy && dpy->fd >= 0)
+      return sym_create_sgimage_image(disp, buffer, sym_mem_attr_tag);
    if (target != EGL_LINUX_DMA_BUF_EXT || !dpy || dpy->fd < 0) {
       _eglError(EGL_BAD_PARAMETER,
                 "eglCreateImageKHR: only EGL_LINUX_DMA_BUF_EXT (a chunk handle) or EGL_NATIVE_PIXMAP_KHR (RSgImage*) on the Mali");
@@ -509,12 +515,31 @@ struct sym_sg_layout {
    unsigned imp_size, res_off;            /* ... and the image's offset inside it */
 };
 
+static bool sym_sg_layout_fill(struct sym_sg_layout *l);
+
 static bool
 sym_sg_layout_get(void *rsgimage, struct sym_sg_layout *l)
 {
    memset(l, 0, sizeof(*l));
    if (!symgl_sgimage_info(rsgimage, &l->sg))
       return false;
+   return sym_sg_layout_fill(l);
+}
+
+/* G8: plain memory of this process described directly (EGL_SYMBIAN_MEMORY_IMAGE_PH; the buffer IS a symgl_sgimage*) */
+static bool
+sym_mem_layout_get(const symgl_sgimage *mem, struct sym_sg_layout *l)
+{
+   memset(l, 0, sizeof(*l));
+   if (!mem || !mem->base || !mem->width || !mem->height)
+      return false;
+   l->sg = *mem;
+   return sym_sg_layout_fill(l);
+}
+
+static bool
+sym_sg_layout_fill(struct sym_sg_layout *l)
+{
    switch (l->sg.format) {
    case SYMGL_SGFMT_ARGB8888:
       l->pf = PIPE_FORMAT_B8G8R8A8_UNORM;
@@ -586,7 +611,8 @@ sym_create_sgimage_image(_EGLDisplay *disp, EGLClientBuffer rsgimage, const EGLi
    if (!_eglParseImageAttribList(&a, disp, attr_list))
       return NULL;
    struct sym_sg_layout l;
-   if (!rsgimage || !sym_sg_layout_get(rsgimage, &l)) {
+   const bool mem = attr_list == sym_mem_attr_tag;
+   if (!rsgimage || !(mem ? sym_mem_layout_get((const symgl_sgimage *)rsgimage, &l) : sym_sg_layout_get(rsgimage, &l))) {
       _eglError(EGL_BAD_PARAMETER, "eglCreateImageKHR: not an RSgImage in system memory (or a format we cannot use)");
       return NULL;
    }
