@@ -618,6 +618,8 @@ sym_create_sgimage_image(_EGLDisplay *disp, EGLClientBuffer rsgimage, const EGLi
    }
    int prime = -1;
    struct pipe_resource *res = sym_sg_resource(dpy, &l, PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_RENDER_TARGET, &prime);
+   if (!res && mem)   /* lima renders only into a 16-pixel aligned stride: the image can still be sampled */
+      res = sym_sg_resource(dpy, &l, PIPE_BIND_SAMPLER_VIEW, &prime);
    if (!res) {
       _eglError(EGL_BAD_ALLOC, "eglCreateImageKHR: the RSgImage cannot be imported");
       return NULL;
