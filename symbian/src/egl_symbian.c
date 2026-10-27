@@ -25,6 +25,7 @@
 #include "eglsync.h"
 #include "egltypedefs.h"
 #include "c11/threads.h"
+void symmali_log(const char *msg);   /* symmali.cpp */
 #include "util/os_time.h"
 #include <time.h>
 
@@ -767,6 +768,14 @@ sym_wait_client(_EGLDisplay *disp, _EGLContext *c)
 {
    struct sym_egl_display *dpy = sym_egl_display(disp);
    struct sym_egl_context *ctx = sym_egl_context(c);
+   static int said;
+   if (said < 4) {
+      said++;
+      char m[96];
+      snprintf(m, sizeof m, "PH: [symegl] eglWaitClient ctx %p st %p fd %d", (void *)ctx, ctx ? (void *)ctx->st : NULL,
+               dpy ? dpy->fd : -9);
+      symmali_log(m);
+   }
    if (!ctx || !ctx->st)
       return EGL_TRUE;
    /* the "before" half too, right ahead of the flush that submits the job: Mesa's eglWaitNative never reaches the
