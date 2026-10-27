@@ -468,21 +468,31 @@ sym_get_egl_image(struct pipe_frontend_screen *fscreen, void *egl_image, struct 
  *     display target over the chunk's CPU address).
  * CPU cache maintenance (the image's chunk is cached when the image has CPU access): the imported ranges are
  * registered; eglWaitNative = the CPU's writes go to memory before the GPU reads/writes (clean+invalidate),
- * eglWaitClient = finish the GPU, then clean+invalidate so the CPU reads what the GPU wrote (RMaliChannel::CacheSync ops). */
+ * eglWaitClient = finish the GPU, then invalidate so the CPU reads what the GPU wrote (RMaliChannel::CacheSync ops).
+ * Memory images (G8) carry a role instead: see sym_range_add_role. */
 
 #define SYM_MAX_RANGES 32
+/* G8: a range's role decides its maintenance. Kernel op 1 (Cache::SyncMemoryBeforeDmaRead) and op 2 INVALIDATE the
+ * inner lines, so they must never touch memory another thread may be writing: a SOURCE (the CPU writes it, the GPU
+ * only reads it -- the composer's surface buffers, drawn into by their owners at any time) only gets cleaned (op 0)
+ * before GPU work; a TARGET (the GPU writes it, the CPU reads it) is cleaned+invalidated before and invalidated after;
+ * BOTH (RSgImages and the other G6b users: either side may write) keeps the old rule. */
+#define SYM_RANGE_BOTH 0
+#define SYM_RANGE_SOURCE 1
+#define SYM_RANGE_TARGET 2
 static struct {
-   int used, prime;
+   int used, prime, role;
    uint32_t off, size;
 } sym_ranges[SYM_MAX_RANGES];
 
 static int
-sym_range_add(int prime, uint32_t off, uint32_t size)
+sym_range_add_role(int prime, uint32_t off, uint32_t size, int role)
 {
    for (int i = 0; i < SYM_MAX_RANGES; i++) {
       if (!sym_ranges[i].used) {
          sym_ranges[i].used = 1;
          sym_ranges[i].prime = prime;
+         sym_ranges[i].role = role;
          sym_ranges[i].off = off;
          sym_ranges[i].size = size;
          return i;
@@ -498,12 +508,29 @@ sym_range_remove(int idx)
       sym_ranges[idx].used = 0;
 }
 
-static void
-sym_ranges_sync(int fd, int op)
+static int
+sym_range_add(int prime, uint32_t off, uint32_t size)
 {
-   for (int i = 0; i < SYM_MAX_RANGES; i++)
-      if (sym_ranges[i].used)
-         sym_drm_cache_sync(fd, sym_ranges[i].prime, sym_ranges[i].off, sym_ranges[i].size, op);
+   return sym_range_add_role(prime, off, size, SYM_RANGE_BOTH);
+}
+
+/* before = 1: the CPU wrote, the GPU will read/write; before = 0: the GPU wrote, the CPU will read */
+static void
+sym_ranges_sync(int fd, int before)
+{
+   for (int i = 0; i < SYM_MAX_RANGES; i++) {
+      if (!sym_ranges[i].used)
+         continue;
+      const int role = sym_ranges[i].role;
+      int op;
+      if (before)
+         op = role == SYM_RANGE_SOURCE ? 0 : 1;
+      else if (role == SYM_RANGE_SOURCE)
+         continue;
+      else
+         op = 2;
+      sym_drm_cache_sync(fd, sym_ranges[i].prime, sym_ranges[i].off, sym_ranges[i].size, op);
+   }
 }
 
 struct sym_sg_layout {
@@ -637,9 +664,12 @@ sym_create_sgimage_image(_EGLDisplay *disp, EGLClientBuffer rsgimage, const EGLi
    img->internalformat = l.internalformat;
    img->fd = dpy->fd;
    img->prime_fd = prime;
-   img->range = sym_range_add(prime, l.res_off, l.sg.stride * l.sg.height);
+   /* G8 memory images: usage bit 0 = a render target (the GPU writes, the CPU reads), else a source the CPU keeps
+    * writing (clean only: an invalidate would drop another thread's writes) */
+   const int role = !mem ? SYM_RANGE_BOTH : (l.sg.usage & 1) ? SYM_RANGE_TARGET : SYM_RANGE_SOURCE;
+   img->range = sym_range_add_role(prime, l.res_off, l.sg.stride * l.sg.height, role);
    /* the CPU filled it: its dirty lines go to memory before the GPU samples it */
-   sym_drm_cache_sync(dpy->fd, prime, l.res_off, l.sg.stride * l.sg.height, 1);
+   sym_drm_cache_sync(dpy->fd, prime, l.res_off, l.sg.stride * l.sg.height, role == SYM_RANGE_SOURCE ? 0 : 1);
    return &img->base;
 }
 
@@ -741,11 +771,7 @@ sym_wait_client(_EGLDisplay *disp, _EGLContext *c)
       return EGL_TRUE;
    sym_finish_context(dpy, ctx->st);
    if (dpy->fd >= 0)
-      /* the GPU wrote them, the CPU will read: clean+invalidate, not a bare invalidate -- another thread may be writing
-       * one of the registered images right now (the GPU composer samples buffers their owners keep drawing into), and an
-       * invalidate would throw its dirty lines away (garbage blocks in the home screen, boot 1783); with no dirty lines
-       * (eglWaitNative before the GPU work cleaned them) it is the same as an invalidate */
-      sym_ranges_sync(dpy->fd, 1);
+      sym_ranges_sync(dpy->fd, 0);   /* the GPU wrote them, the CPU will read (sources are left alone) */
    return EGL_TRUE;
 }
 
@@ -755,7 +781,7 @@ sym_wait_native(EGLint engine)
    (void)engine;
    struct sym_egl_display *dpy = sym_the_disp ? sym_egl_display(sym_the_disp) : NULL;
    if (dpy && dpy->fd >= 0)
-      sym_ranges_sync(dpy->fd, 1);   /* the CPU wrote them, the GPU will read/write */
+      sym_ranges_sync(dpy->fd, 1);   /* the CPU wrote them, the GPU will read/write (sources: clean only) */
    return EGL_TRUE;
 }
 
