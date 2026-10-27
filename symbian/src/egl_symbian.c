@@ -468,7 +468,7 @@ sym_get_egl_image(struct pipe_frontend_screen *fscreen, void *egl_image, struct 
  *     display target over the chunk's CPU address).
  * CPU cache maintenance (the image's chunk is cached when the image has CPU access): the imported ranges are
  * registered; eglWaitNative = the CPU's writes go to memory before the GPU reads/writes (clean+invalidate),
- * eglWaitClient = finish the GPU, then invalidate so the CPU reads what the GPU wrote (RMaliChannel::CacheSync ops). */
+ * eglWaitClient = finish the GPU, then clean+invalidate so the CPU reads what the GPU wrote (RMaliChannel::CacheSync ops). */
 
 #define SYM_MAX_RANGES 32
 static struct {
@@ -741,7 +741,11 @@ sym_wait_client(_EGLDisplay *disp, _EGLContext *c)
       return EGL_TRUE;
    sym_finish_context(dpy, ctx->st);
    if (dpy->fd >= 0)
-      sym_ranges_sync(dpy->fd, 2);   /* the GPU wrote them, the CPU will read */
+      /* the GPU wrote them, the CPU will read: clean+invalidate, not a bare invalidate -- another thread may be writing
+       * one of the registered images right now (the GPU composer samples buffers their owners keep drawing into), and an
+       * invalidate would throw its dirty lines away (garbage blocks in the home screen, boot 1783); with no dirty lines
+       * (eglWaitNative before the GPU work cleaned them) it is the same as an invalidate */
+      sym_ranges_sync(dpy->fd, 1);
    return EGL_TRUE;
 }
 
