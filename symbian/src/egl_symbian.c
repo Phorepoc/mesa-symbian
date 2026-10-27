@@ -769,6 +769,11 @@ sym_wait_client(_EGLDisplay *disp, _EGLContext *c)
    struct sym_egl_context *ctx = sym_egl_context(c);
    if (!ctx || !ctx->st)
       return EGL_TRUE;
+   /* the "before" half too, right ahead of the flush that submits the job: Mesa's eglWaitNative never reaches the
+    * driver for a SURFACELESS context (_eglWaitNativeCommon: no draw surface = EGL_BAD_CURRENT_SURFACE), so the G8
+    * composer's sources were cleaned only when their images were created -- reused images showed stale cache lines */
+   if (dpy->fd >= 0)
+      sym_ranges_sync(dpy->fd, 1);
    sym_finish_context(dpy, ctx->st);
    if (dpy->fd >= 0)
       sym_ranges_sync(dpy->fd, 0);   /* the GPU wrote them, the CPU will read (sources are left alone) */
