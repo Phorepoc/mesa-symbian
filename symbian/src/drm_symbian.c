@@ -828,9 +828,17 @@ sym_drm_cache_sync(int fd, int prime_fd, uint32_t offset, uint32_t size, int op)
 {
    struct dev *d = dev_of(fd);
    struct import *im = import_of(d, prime_fd);
-   if (!im || offset + size > im->size)
+   static int said;
+   if (!im || offset + size > im->size) {
+      if (said++ < 8)
+         shimlog("[symdrm] cache sync %d: +%u (%u bytes) outside import %d (%u bytes)", op, offset, size, prime_fd,
+                 im ? im->size : 0);
       return -1;
-   return symmali_cache_sync(d->m, im->va + offset, size, op);
+   }
+   int r = symmali_cache_sync(d->m, im->va + offset, size, op);
+   if (r != 0 && said++ < 8)
+      shimlog("[symdrm] cache sync %d of va %08x (%u bytes) failed: %d", op, im->va + offset, size, r);
+   return r;
 }
 
 long
