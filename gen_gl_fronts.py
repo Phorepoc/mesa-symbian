@@ -197,6 +197,13 @@ def gen_front(api: str, dll: str, protos: dict, ordinals: dict[str, int], out_na
         if name in ("glViewport", "glScissor"):
             trace = (f"\tstatic TInt traced;\n\tif (traced < 16)\n\t\t{{ ++traced; "
                      f"RDebug::Printf(\"PH: {dll} {name}(%d,%d,%d,%d)\", (TInt)x, (TInt)y, (TInt)width, (TInt)height); }}\n")
+        # TRACE (Let's Golf 2 black frames, 2026-10-27): a failed shader compile / program link, with its info log
+        if dll == "libGLESv2.dll" and name in ("glCompileShader", "glLinkProgram"):
+            what, q, lg, obj = (("shader", "glGetShaderiv", "glGetShaderInfoLog", "shader") if name == "glCompileShader"
+                                else ("program", "glGetProgramiv", "glGetProgramInfoLog", "program"))
+            st = "0x8B81" if name == "glCompileShader" else "0x8B82"
+            body = (f"{call};
+	PhglCheckStatus(\"{what}\", {obj}, {st}, \"{q}\", \"{lg}\");")
         if name == "eglQuerySurface":
             body = (f"EGLBoolean r = {call};\n\tstatic TInt traced;\n\tif (traced < 16 && value)\n"
                     f"\t\t{{ ++traced; RDebug::Printf(\"PH: {dll} eglQuerySurface(0x%x) -> %d (r=%d)\", (TInt)attribute, "
