@@ -1,7 +1,7 @@
 # mesa-symbian
 
 This is [Mesa](https://mesa3d.org) on Symbian. It gives [Phorepoc](https://github.com/Phorepoc) OpenGL ES 1.1 and 2.0
-with EGL, so 3D games and apps run. On the PinePhone it draws with the Mali-400 GPU through Mesa's lima driver, and on
+with EGL, so 3D games and apps run. On boards with a Mali-400 GPU it draws with it through Mesa's lima driver, and on
 any other board it falls back to softpipe, Mesa's software renderer.
 
 We don't keep a copy of Mesa here. The build downloads the release named in `mesa.lock` (26.2.4 at the moment) and
@@ -15,7 +15,7 @@ compiles it for Symbian. This repository holds the parts Symbian needs on top:
 
 The rest of the GL stack lives in [core](https://github.com/Phorepoc/core). That's `phgl.dll`, which these libraries are
 linked into, and the code that connects GL surfaces to the screen. The Mali driver itself is in
-[adaptation-a64](https://github.com/Phorepoc/adaptation-a64).
+the SoC adaptation that has the GPU.
 
 ## Building
 
@@ -26,7 +26,7 @@ once. Then build in the toolchain's Mesa image:
 docker run --rm -v "$PWD/..:/src" -w /src/mesa-symbian ghcr.io/phorepoc/mesa bash build.sh
 ```
 
-The libraries end up in `core/build/mesa-build/arm/`, ready for the PinePhone build to pick up.
+The libraries end up in `core/build/mesa-build/arm/`, ready for the board build to pick up.
 
 ## License
 

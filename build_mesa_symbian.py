@@ -7,7 +7,7 @@ Runs INSIDE the toolchain mesa image (ghcr.io/phorepoc/mesa), after a meson host
 of the generators (build.sh does all three steps). For every TU of the static libraries in LIBS it takes the host
 compile command from <build>/mesa-build/host/compile_commands.json, keeps the include dirs and the per-target -D macros,
 keeps only the global configure macros that hold on Symbian (GLOBAL_KEEP; Linux facts like futex/dlfcn/memfd are
-dropped), and recompiles it with the P.I.P.S. client line of a PinePhone-only DLL:
+dropped), and recompiles it with the P.I.P.S. client line of an ARM-only DLL:
   openc_cflags.py --arm (symcc's ARM flags + prefix header + stdapis includes + build_mmp's cdriver transform)
   with -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=softfp (soft-float ABI = links with the rest of the ROM;
   armv7 for ldrex/strex atomics and VFP),
