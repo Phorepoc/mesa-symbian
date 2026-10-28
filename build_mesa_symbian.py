@@ -40,7 +40,7 @@ WORK = os.path.join(BUILD, "mesa-build")       # core's registry links phgl with
 HOST = os.path.join(WORK, "host")
 OUT = os.path.join(WORK, "arm")
 SHIM = os.path.join(HERE, "symbian")
-SEAM = os.path.join(CORE, "os", "src", "symgl")   # symmali.h + symgl_native.h: core's side of the seam
+SEAM = os.path.join(CORE, "os", "src", "symgl")   # symgpu.h + symgl_native.h: core's side of the seam
 
 # the static libraries phgl.dll is made of: softpipe (G2) and lima, the Mali-400 driver (G4) + the panfrost tiling
 # helpers it shares

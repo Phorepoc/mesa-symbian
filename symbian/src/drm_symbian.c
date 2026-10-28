@@ -22,7 +22,7 @@
 #include "xf86drm.h"
 #include "libsync.h"
 #include "drm-uapi/lima_drm.h"
-#include "symmali.h"
+#include "symgpu.h"
 #include "util/os_time.h"
 
 #define FD_BASE 0x5A000000
@@ -63,8 +63,8 @@ struct range {
 };
 
 static struct dev {
-   symmali_t *m;
-   symmali_info_t info;
+   symgpu_t *m;
+   symgpu_info_t info;
    uint32_t committed;
    struct range free_list[MAX_FREE];
    int nfree;
@@ -88,7 +88,7 @@ shimlog(const char *fmt, ...)
    buf[0] = 'P'; buf[1] = 'H'; buf[2] = ':'; buf[3] = ' ';
    vsnprintf(buf + 4, sizeof(buf) - 4, fmt, ap);
    va_end(ap);
-   symmali_log(buf);
+   symgpu_log(buf);
 }
 
 static struct dev *
@@ -113,7 +113,7 @@ pipe_finish(struct dev *d, int pipe, int poll)
 {
    if (d->submitted[pipe] == d->completed[pipe])
       return 0;
-   int r = symmali_wait(d->m, pipe, poll);
+   int r = symgpu_wait(d->m, pipe, poll);
    if (r == 1)
       return 1;
    d->completed[pipe] = d->submitted[pipe];
@@ -171,7 +171,7 @@ arena_alloc(struct dev *d, uint32_t size, uint32_t *off)
          uint32_t want = (end + COMMIT_STEP - 1) & ~(COMMIT_STEP - 1);
          if (want > d->info.arena_max)
             want = d->info.arena_max;
-         int rc = symmali_commit(d->m, d->committed, want - d->committed);
+         int rc = symgpu_commit(d->m, d->committed, want - d->committed);
          if (rc != 0) {
             shimlog("[symdrm] arena commit %u+%u failed: %d", d->committed, want - d->committed, rc);
             return -ENOMEM;
@@ -253,7 +253,7 @@ bo_idle(struct dev *d, struct bo *b, int write)
 
 /* One-off CPU read-speed probe of the (uncached, write-combining) arena memory, on the first big BO. Timed with User::FastCounter (24 MHz CNTPCT on this board -- HAL::EFastCounterFrequency wrongly said 1 MHz; os_time_get_nano is a
  * 1 ms tick and printf's %lld came out as garbage), 8 passes over 16 KB so that a fast load is still measurable; 32-bit values only. "PH: [symdrm] arena read probe" lines. */
-extern unsigned symmali_fast_counter(void);
+extern unsigned symgpu_fast_counter(void);
 
 static void
 arena_read_probe(char *p)
@@ -264,66 +264,66 @@ arena_read_probe(char *p)
    static volatile uint32_t gsink;
    uint32_t sum = 0;
    for (int round = 0; round < 2; round++) {
-      unsigned t0 = symmali_fast_counter();
+      unsigned t0 = symgpu_fast_counter();
       for (int pass = 0; pass < PASSES; pass++)
          for (int i = 0; i < N; i++)
             sum += w[i];
-      unsigned t1 = symmali_fast_counter();
+      unsigned t1 = symgpu_fast_counter();
       shimlog("[symdrm] arena read probe: %d x 32-bit volatile loads from the arena (round %d): %u ticks total = %u ns each", N * PASSES, round, t1 - t0, (t1 - t0) * 125u / 3u / (N * PASSES));
    }
-   unsigned t0 = symmali_fast_counter();
+   unsigned t0 = symgpu_fast_counter();
    for (int pass = 0; pass < PASSES; pass++) {
       memcpy(cachedbuf, p, sizeof(cachedbuf));
       sum += cachedbuf[pass];
    }
-   unsigned t1 = symmali_fast_counter();
+   unsigned t1 = symgpu_fast_counter();
    shimlog("[symdrm] arena read probe: memcpy of %d x %d bytes from the arena: %u ticks total = %u ns per 32-bit word", PASSES, (int)sizeof(cachedbuf), t1 - t0, (t1 - t0) * 125u / 3u / (N * PASSES));
    volatile uint8_t *b = (volatile uint8_t *)p;
-   t0 = symmali_fast_counter();
+   t0 = symgpu_fast_counter();
    for (int pass = 0; pass < PASSES; pass++)
       for (int i = 0; i < 1024; i++)
          sum += b[i];
-   t1 = symmali_fast_counter();
+   t1 = symgpu_fast_counter();
    shimlog("[symdrm] arena read probe: %d byte loads: %u ticks total = %u ns each", 1024 * PASSES, t1 - t0, (t1 - t0) * 125u / 3u / (1024 * PASSES));
    volatile uint32_t *c = (volatile uint32_t *)cachedbuf;
-   t0 = symmali_fast_counter();
+   t0 = symgpu_fast_counter();
    for (int pass = 0; pass < PASSES; pass++)
       for (int i = 0; i < N; i++)
          sum += c[i];
-   t1 = symmali_fast_counter();
+   t1 = symgpu_fast_counter();
    gsink = sum;
    shimlog("[symdrm] arena read probe: control, %d x 32-bit loads from the DLL's .bss buffer: %u ticks total = %u ns each (sum %u, first arena words %08x %08x)", N * PASSES, t1 - t0, (t1 - t0) * 125u / 3u / (N * PASSES), sum, (unsigned)w[0], (unsigned)w[1]);
    {	/* the same loop over a 16 KB buffer on this thread's STACK and over a malloc'd (process heap) buffer: is ANY user memory cached? */
       volatile uint32_t sbuf[N];
       for (int i = 0; i < N; i++)
          sbuf[i] = i;
-      t0 = symmali_fast_counter();
+      t0 = symgpu_fast_counter();
       for (int pass = 0; pass < PASSES; pass++)
          for (int i = 0; i < N; i++)
             sum += sbuf[i];
-      t1 = symmali_fast_counter();
+      t1 = symgpu_fast_counter();
       shimlog("[symdrm] arena read probe: %d x 32-bit loads from a 16 KB STACK buffer: %u ticks total = %u ns each", N * PASSES, t1 - t0, (t1 - t0) * 125u / 3u / (N * PASSES));
       volatile uint32_t *hb = (volatile uint32_t *)malloc(N * 4);
       if (hb) {
          for (int i = 0; i < N; i++)
             hb[i] = i;
-         t0 = symmali_fast_counter();
+         t0 = symgpu_fast_counter();
          for (int pass = 0; pass < PASSES; pass++)
             for (int i = 0; i < N; i++)
                sum += hb[i];
-         t1 = symmali_fast_counter();
+         t1 = symgpu_fast_counter();
          shimlog("[symdrm] arena read probe: %d x 32-bit loads from a malloc'd 16 KB buffer: %u ticks total = %u ns each", N * PASSES, t1 - t0, (t1 - t0) * 125u / 3u / (N * PASSES));
          free((void *)hb);
       }
    }
    {	/* pure ALU reference (no memory): 1,048,576 dependent adds + xors = about 2 cycles each on an in-order A53 */
       uint32_t x = sum | 1;
-      t0 = symmali_fast_counter();
+      t0 = symgpu_fast_counter();
       for (int i = 0; i < (1 << 20); i++) {
          x += (x << 1) ^ (uint32_t)i;
          __asm__ volatile("" : "+r"(x));
       }
-      t1 = symmali_fast_counter();
+      t1 = symgpu_fast_counter();
       gsink = x;
       shimlog("[symdrm] arena read probe: ALU reference, 1048576 iterations (add/shift/xor, no loads): %u ticks total @24 MHz (= %u ps per iteration; x %u)", t1 - t0, (t1 - t0) * 40u, x);
    }
@@ -413,7 +413,7 @@ gem_submit(struct dev *d, struct drm_lima_gem_submit *req)
 
    if (pipe == LIMA_PIPE_PP && sym_drm_sync_hook)
       sym_drm_sync_hook(1);
-   int r = symmali_submit(d->m, pipe, frame, words);
+   int r = symgpu_submit(d->m, pipe, frame, words);
    if (r != 0) {
       shimlog("[symdrm] submit %s failed: %d", pipe ? "PP" : "GP", r);
       return -EINVAL;
@@ -717,12 +717,12 @@ sym_drm_open(void)
    struct dev *d = &the_dev;
    if (d->m)
       return FD_BASE;
-   symmali_t *m = symmali_open();
+   symgpu_t *m = symgpu_open();
    if (!m)
       return -1;
    memset(d, 0, sizeof(*d));
    d->m = m;
-   symmali_info(m, &d->info);
+   symgpu_info(m, &d->info);
    d->free_list[0].off = 0;
    d->free_list[0].size = d->info.arena_max;
    d->nfree = 1;
@@ -741,8 +741,8 @@ sym_drm_close(int fd)
       pipe_finish(d, p, 0);
    for (int i = 0; i < MAX_IMPORT; i++)
       if (d->imports[i].used)
-         symmali_unimport(d->m, d->imports[i].va);
-   symmali_close(d->m);
+         symgpu_unimport(d->m, d->imports[i].va);
+   symgpu_close(d->m);
    memset(d, 0, sizeof(*d));
 }
 
@@ -757,7 +757,7 @@ sym_drm_import(int fd, int chunk_handle, uint32_t offset, uint32_t size, void *c
       if (im->used)
          continue;
       uint32_t va = 0;
-      int r = symmali_import(d->m, chunk_handle, offset, size, &va);
+      int r = symgpu_import(d->m, chunk_handle, offset, size, &va);
       if (r != 0) {
          shimlog("[symdrm] import of chunk %d +%u (%u bytes) failed: %d", chunk_handle, offset, size, r);
          return -1;
@@ -785,7 +785,7 @@ sym_drm_import_addr(int fd, const void *addr, uint32_t size)
       if (im->used)
          continue;
       uint32_t va = 0;
-      int r = symmali_import_addr(d->m, addr, size, &va);
+      int r = symgpu_import_addr(d->m, addr, size, &va);
       if (r != 0) {
          shimlog("[symdrm] import of address %p (%u bytes) failed: %d", addr, size, r);
          return -1;
@@ -822,7 +822,7 @@ sym_drm_unimport(int fd, int prime_fd)
       d->bos[im->bo].import = 0;      /* lima still holds the handle: it closes it as a plain BO */
       d->bos[im->bo].used = 0;
    }
-   symmali_unimport(d->m, im->va);
+   symgpu_unimport(d->m, im->va);
    im->used = 0;
 }
 
@@ -845,7 +845,7 @@ sym_drm_cache_sync(int fd, int prime_fd, uint32_t offset, uint32_t size, int op)
                  im ? im->size : 0);
       return -1;
    }
-   int r = symmali_cache_sync(d->m, im->va + offset, size, op);
+   int r = symgpu_cache_sync(d->m, im->va + offset, size, op);
    if (r != 0 && said++ < 8)
       shimlog("[symdrm] cache sync %d of va %08x (%u bytes) failed: %d", op, im->va + offset, size, r);
    return r;
