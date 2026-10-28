@@ -24,6 +24,8 @@
 #include "drm-uapi/lima_drm.h"
 #include "symgpu.h"
 #include "util/os_time.h"
+#include "util/simple_mtx.h"
+#include "c11/threads.h"
 
 #define FD_BASE 0x5A000000
 #define FD_SYNC 0x1000
@@ -97,6 +99,38 @@ dev_of(int fd)
    if (fd != FD_BASE || !the_dev.m)
       return NULL;
    return &the_dev;
+}
+
+/* ---- one lock for the whole shim ----------------------------------------------------------------------------
+ * The device state (the_dev: BOs, the arena, the job timelines, sync fds) is process-wide and every GL thread of the
+ * process comes through here: Alfred's GPU mode has two (the WFC composition thread and phvg's GL worker). Each entry
+ * point holds this lock -- recursive, as entry points call one another. A GPU wait inside holds it too (jobs finish in
+ * bounded time; symgpu completes the wait to the waiting thread, whoever submitted). */
+static simple_mtx_t drm_mtx = SIMPLE_MTX_INITIALIZER;
+static thrd_t drm_owner;
+static int drm_depth;
+
+static void
+drm_lock(void)
+{
+   /* (owner is written before depth, release / acquire: a nonzero depth read here shows its owner) */
+   if (__atomic_load_n(&drm_depth, __ATOMIC_ACQUIRE) && thrd_equal(drm_owner, thrd_current())) {
+      drm_depth++;
+      return;
+   }
+   simple_mtx_lock(&drm_mtx);
+   drm_owner = thrd_current();
+   __atomic_store_n(&drm_depth, 1, __ATOMIC_RELEASE);
+}
+
+static void
+drm_unlock(void)
+{
+   if (drm_depth == 1) {
+      __atomic_store_n(&drm_depth, 0, __ATOMIC_RELEASE);
+      simple_mtx_unlock(&drm_mtx);
+   } else
+      drm_depth--;
 }
 
 /* ---- the job timelines ------------------------------------------------------------------------------------- */
@@ -454,8 +488,8 @@ fail(int err)
    return -1;
 }
 
-int
-drmIoctl(int fd, unsigned long request, void *arg)
+static int
+drmIoctl_unlocked(int fd, unsigned long request, void *arg)
 {
    struct dev *d = dev_of(fd);
    if (!d)
@@ -511,8 +545,8 @@ drmIoctl(int fd, unsigned long request, void *arg)
 
 static drmVersion the_version = { 1, 0, 0, 4, (char *)"lima", 0, (char *)"", 0, (char *)"" };
 
-drmVersionPtr
-drmGetVersion(int fd)
+static drmVersionPtr
+drmGetVersion_unlocked(int fd)
 {
    return dev_of(fd) ? &the_version : NULL;
 }
@@ -523,8 +557,8 @@ drmFreeVersion(drmVersionPtr v)
    (void)v;
 }
 
-int
-drmGetDevice2(int fd, uint32_t flags, drmDevicePtr *device)
+static int
+drmGetDevice2_unlocked(int fd, uint32_t flags, drmDevicePtr *device)
 {
    (void)fd; (void)flags;
    *device = NULL;
@@ -537,15 +571,15 @@ drmFreeDevice(drmDevicePtr *device)
    (void)device;
 }
 
-int
-drmPrimeHandleToFD(int fd, uint32_t handle, uint32_t flags, int *prime_fd)
+static int
+drmPrimeHandleToFD_unlocked(int fd, uint32_t handle, uint32_t flags, int *prime_fd)
 {
    (void)fd; (void)handle; (void)flags; (void)prime_fd;
    return -ENOSYS;
 }
 
-int
-drmPrimeFDToHandle(int fd, int prime_fd, uint32_t *handle)
+static int
+drmPrimeFDToHandle_unlocked(int fd, int prime_fd, uint32_t *handle)
 {
    struct dev *d = dev_of(fd);
    int idx = prime_fd - (FD_BASE + FD_IMPORT);
@@ -569,8 +603,8 @@ drmPrimeFDToHandle(int fd, int prime_fd, uint32_t *handle)
    return 0;
 }
 
-int
-drmSyncobjCreate(int fd, uint32_t flags, uint32_t *handle)
+static int
+drmSyncobjCreate_unlocked(int fd, uint32_t flags, uint32_t *handle)
 {
    struct dev *d = dev_of(fd);
    if (!d)
@@ -587,8 +621,8 @@ drmSyncobjCreate(int fd, uint32_t flags, uint32_t *handle)
    return -ENOMEM;
 }
 
-int
-drmSyncobjDestroy(int fd, uint32_t handle)
+static int
+drmSyncobjDestroy_unlocked(int fd, uint32_t handle)
 {
    struct dev *d = dev_of(fd);
    if (!d || handle == 0 || handle > MAX_SYNCOBJ)
@@ -597,8 +631,8 @@ drmSyncobjDestroy(int fd, uint32_t handle)
    return 0;
 }
 
-int
-drmSyncobjWait(int fd, uint32_t *handles, unsigned num_handles, int64_t timeout_nsec, unsigned flags,
+static int
+drmSyncobjWait_unlocked(int fd, uint32_t *handles, unsigned num_handles, int64_t timeout_nsec, unsigned flags,
                uint32_t *first_signaled)
 {
    struct dev *d = dev_of(fd);
@@ -640,8 +674,8 @@ syncfd_of(struct dev *d, int fd)
    return &d->syncfd[i];
 }
 
-int
-drmSyncobjImportSyncFile(int fd, uint32_t handle, int sync_file_fd)
+static int
+drmSyncobjImportSyncFile_unlocked(int fd, uint32_t handle, int sync_file_fd)
 {
    struct dev *d = dev_of(fd);
    if (!d || handle == 0 || handle > MAX_SYNCOBJ || !d->syncobj_used[handle])
@@ -653,8 +687,8 @@ drmSyncobjImportSyncFile(int fd, uint32_t handle, int sync_file_fd)
    return 0;
 }
 
-int
-drmSyncobjExportSyncFile(int fd, uint32_t handle, int *sync_file_fd)
+static int
+drmSyncobjExportSyncFile_unlocked(int fd, uint32_t handle, int *sync_file_fd)
 {
    struct dev *d = dev_of(fd);
    if (!d || handle == 0 || handle > MAX_SYNCOBJ || !d->syncobj_used[handle])
@@ -665,8 +699,8 @@ drmSyncobjExportSyncFile(int fd, uint32_t handle, int *sync_file_fd)
 
 /* ---- libsync ------------------------------------------------------------------------------------------------ */
 
-int
-sync_wait(int fd, int timeout_ms)
+static int
+sync_wait_unlocked(int fd, int timeout_ms)
 {
    struct dev *d = &the_dev;
    struct syncpt *pt = syncfd_of(d, fd);
@@ -676,8 +710,8 @@ sync_wait(int fd, int timeout_ms)
    return r ? fail(r) : 0;
 }
 
-int
-sync_merge(const char *name, int fd1, int fd2)
+static int
+sync_merge_unlocked(const char *name, int fd1, int fd2)
 {
    (void)name;
    struct dev *d = &the_dev;
@@ -690,8 +724,8 @@ sync_merge(const char *name, int fd1, int fd2)
    return syncfd_new(d, &m);
 }
 
-int
-sync_accumulate(const char *name, int *fd, int fd2)
+static int
+sync_accumulate_unlocked(const char *name, int *fd, int fd2)
 {
    struct dev *d = &the_dev;
    if (*fd < 0) {
@@ -711,8 +745,8 @@ sync_accumulate(const char *name, int *fd, int fd2)
 
 /* ---- the Symbian side --------------------------------------------------------------------------------------- */
 
-int
-sym_drm_open(void)
+static int
+sym_drm_open_unlocked(void)
 {
    struct dev *d = &the_dev;
    if (d->m)
@@ -731,8 +765,8 @@ sym_drm_open(void)
    return FD_BASE;
 }
 
-void
-sym_drm_close(int fd)
+static void
+sym_drm_close_unlocked(int fd)
 {
    struct dev *d = dev_of(fd);
    if (!d)
@@ -746,8 +780,8 @@ sym_drm_close(int fd)
    memset(d, 0, sizeof(*d));
 }
 
-int
-sym_drm_import(int fd, int chunk_handle, uint32_t offset, uint32_t size, void *cpu)
+static int
+sym_drm_import_unlocked(int fd, int chunk_handle, uint32_t offset, uint32_t size, void *cpu)
 {
    struct dev *d = dev_of(fd);
    if (!d)
@@ -774,8 +808,8 @@ sym_drm_import(int fd, int chunk_handle, uint32_t offset, uint32_t size, void *c
    return -1;
 }
 
-int
-sym_drm_import_addr(int fd, const void *addr, uint32_t size)
+static int
+sym_drm_import_addr_unlocked(int fd, const void *addr, uint32_t size)
 {
    struct dev *d = dev_of(fd);
    if (!d)
@@ -810,8 +844,8 @@ import_of(struct dev *d, int prime_fd)
    return &d->imports[i];
 }
 
-void
-sym_drm_unimport(int fd, int prime_fd)
+static void
+sym_drm_unimport_unlocked(int fd, int prime_fd)
 {
    struct dev *d = dev_of(fd);
    struct import *im = import_of(d, prime_fd);
@@ -826,15 +860,15 @@ sym_drm_unimport(int fd, int prime_fd)
    im->used = 0;
 }
 
-uint32_t
-sym_drm_import_va(int fd, int prime_fd)
+static uint32_t
+sym_drm_import_va_unlocked(int fd, int prime_fd)
 {
    struct import *im = import_of(dev_of(fd), prime_fd);
    return im ? im->va : 0;
 }
 
-int
-sym_drm_cache_sync(int fd, int prime_fd, uint32_t offset, uint32_t size, int op)
+static int
+sym_drm_cache_sync_unlocked(int fd, int prime_fd, uint32_t offset, uint32_t size, int op)
 {
    struct dev *d = dev_of(fd);
    struct import *im = import_of(d, prime_fd);
@@ -851,15 +885,15 @@ sym_drm_cache_sync(int fd, int prime_fd, uint32_t offset, uint32_t size, int op)
    return r;
 }
 
-long
-sym_drm_fd_size(int prime_fd)
+static long
+sym_drm_fd_size_unlocked(int prime_fd)
 {
    struct import *im = import_of(&the_dev, prime_fd);
    return im ? (long)im->size : -1;
 }
 
-void *
-sym_drm_mmap(int fd, uint64_t offset, size_t size)
+static void *
+sym_drm_mmap_unlocked(int fd, uint64_t offset, size_t size)
 {
    struct dev *d = dev_of(fd);
    struct bo *b = d ? bo_of(d, (uint32_t)(offset >> 12)) : NULL;
@@ -868,16 +902,231 @@ sym_drm_mmap(int fd, uint64_t offset, size_t size)
    return b->cpu;
 }
 
+static void
+sym_drm_munmap_unlocked(void *p, size_t size)
+{
+   (void)p; (void)size;
+}
+
+static void
+sym_drm_close_fd_unlocked(int fd)
+{
+   int i = fd - (FD_BASE + FD_SYNC);
+   if (i >= 0 && i < MAX_SYNCFD)
+      the_dev.syncfd_used[i] = 0;
+}
+
+/* ---- the locked entry points (see drm_lock) ---------------------------------------------------------------- */
+
+int
+drmIoctl(int fd, unsigned long request, void *arg)
+{
+   drm_lock();
+   int r = drmIoctl_unlocked(fd, request, arg);
+   drm_unlock();
+   return r;
+}
+
+drmVersionPtr
+drmGetVersion(int fd)
+{
+   drm_lock();
+   drmVersionPtr r = drmGetVersion_unlocked(fd);
+   drm_unlock();
+   return r;
+}
+
+int
+drmGetDevice2(int fd, uint32_t flags, drmDevicePtr *device)
+{
+   drm_lock();
+   int r = drmGetDevice2_unlocked(fd, flags, device);
+   drm_unlock();
+   return r;
+}
+
+int
+drmPrimeHandleToFD(int fd, uint32_t handle, uint32_t flags, int *prime_fd)
+{
+   drm_lock();
+   int r = drmPrimeHandleToFD_unlocked(fd, handle, flags, prime_fd);
+   drm_unlock();
+   return r;
+}
+
+int
+drmPrimeFDToHandle(int fd, int prime_fd, uint32_t *handle)
+{
+   drm_lock();
+   int r = drmPrimeFDToHandle_unlocked(fd, prime_fd, handle);
+   drm_unlock();
+   return r;
+}
+
+int
+drmSyncobjCreate(int fd, uint32_t flags, uint32_t *handle)
+{
+   drm_lock();
+   int r = drmSyncobjCreate_unlocked(fd, flags, handle);
+   drm_unlock();
+   return r;
+}
+
+int
+drmSyncobjDestroy(int fd, uint32_t handle)
+{
+   drm_lock();
+   int r = drmSyncobjDestroy_unlocked(fd, handle);
+   drm_unlock();
+   return r;
+}
+
+int
+drmSyncobjWait(int fd, uint32_t *handles, unsigned num_handles, int64_t timeout_nsec, unsigned flags,
+               uint32_t *first_signaled)
+{
+   drm_lock();
+   int r = drmSyncobjWait_unlocked(fd, handles, num_handles, timeout_nsec, flags, first_signaled);
+   drm_unlock();
+   return r;
+}
+
+int
+drmSyncobjImportSyncFile(int fd, uint32_t handle, int sync_file_fd)
+{
+   drm_lock();
+   int r = drmSyncobjImportSyncFile_unlocked(fd, handle, sync_file_fd);
+   drm_unlock();
+   return r;
+}
+
+int
+drmSyncobjExportSyncFile(int fd, uint32_t handle, int *sync_file_fd)
+{
+   drm_lock();
+   int r = drmSyncobjExportSyncFile_unlocked(fd, handle, sync_file_fd);
+   drm_unlock();
+   return r;
+}
+
+int
+sync_wait(int fd, int timeout_ms)
+{
+   drm_lock();
+   int r = sync_wait_unlocked(fd, timeout_ms);
+   drm_unlock();
+   return r;
+}
+
+int
+sync_merge(const char *name, int fd1, int fd2)
+{
+   drm_lock();
+   int r = sync_merge_unlocked(name, fd1, fd2);
+   drm_unlock();
+   return r;
+}
+
+int
+sync_accumulate(const char *name, int *fd, int fd2)
+{
+   drm_lock();
+   int r = sync_accumulate_unlocked(name, fd, fd2);
+   drm_unlock();
+   return r;
+}
+
+int
+sym_drm_open(void)
+{
+   drm_lock();
+   int r = sym_drm_open_unlocked();
+   drm_unlock();
+   return r;
+}
+
+void
+sym_drm_close(int fd)
+{
+   drm_lock();
+   sym_drm_close_unlocked(fd);
+   drm_unlock();
+}
+
+int
+sym_drm_import(int fd, int chunk_handle, uint32_t offset, uint32_t size, void *cpu)
+{
+   drm_lock();
+   int r = sym_drm_import_unlocked(fd, chunk_handle, offset, size, cpu);
+   drm_unlock();
+   return r;
+}
+
+int
+sym_drm_import_addr(int fd, const void *addr, uint32_t size)
+{
+   drm_lock();
+   int r = sym_drm_import_addr_unlocked(fd, addr, size);
+   drm_unlock();
+   return r;
+}
+
+void
+sym_drm_unimport(int fd, int prime_fd)
+{
+   drm_lock();
+   sym_drm_unimport_unlocked(fd, prime_fd);
+   drm_unlock();
+}
+
+uint32_t
+sym_drm_import_va(int fd, int prime_fd)
+{
+   drm_lock();
+   uint32_t r = sym_drm_import_va_unlocked(fd, prime_fd);
+   drm_unlock();
+   return r;
+}
+
+int
+sym_drm_cache_sync(int fd, int prime_fd, uint32_t offset, uint32_t size, int op)
+{
+   drm_lock();
+   int r = sym_drm_cache_sync_unlocked(fd, prime_fd, offset, size, op);
+   drm_unlock();
+   return r;
+}
+
+long
+sym_drm_fd_size(int prime_fd)
+{
+   drm_lock();
+   long r = sym_drm_fd_size_unlocked(prime_fd);
+   drm_unlock();
+   return r;
+}
+
+void *
+sym_drm_mmap(int fd, uint64_t offset, size_t size)
+{
+   drm_lock();
+   void *r = sym_drm_mmap_unlocked(fd, offset, size);
+   drm_unlock();
+   return r;
+}
+
 void
 sym_drm_munmap(void *p, size_t size)
 {
-   (void)p; (void)size;
+   drm_lock();
+   sym_drm_munmap_unlocked(p, size);
+   drm_unlock();
 }
 
 void
 sym_drm_close_fd(int fd)
 {
-   int i = fd - (FD_BASE + FD_SYNC);
-   if (i >= 0 && i < MAX_SYNCFD)
-      the_dev.syncfd_used[i] = 0;
+   drm_lock();
+   sym_drm_close_fd_unlocked(fd);
+   drm_unlock();
 }
