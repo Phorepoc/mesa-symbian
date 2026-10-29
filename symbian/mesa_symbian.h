@@ -18,14 +18,28 @@
 #define UTIL_ARCH_LITTLE_ENDIAN 1
 #define UTIL_ARCH_BIG_ENDIAN 0
 
-/* Thread-locals (G2 first light): arm-none-eabi GCC compiles __thread as ELF TLS (__aeabi_read_tp + a TLS block per
- * thread), which neither our DLL link nor the kernel sets up. Mesa has a handful (glapi's current dispatch + context,
- * EGL's per-thread state, u_debug/call_once scratch): they become per-process globals (DLL WSD is per process). That
- * is right for the usual Symbian GL client -- one GL thread per process -- and WRONG for two threads with current
- * contexts in one process. The fix when that matters: real TLS (an __aeabi_read_tp that returns a per-thread block
- * built from .tdata/.tbss, kept by the DLL linker script). */
+/* Thread-locals: arm-none-eabi GCC compiles __thread as ELF TLS (__aeabi_read_tp + a TLS block per thread), which
+ * neither our DLL link nor the kernel sets up, so `thread_local` is compiled away. The variables whose per-thread value
+ * matters live in per-thread slots instead (symgl_thread_slot, core's symgl_tls.cpp: Dll::Tls): glapi's current
+ * dispatch + context (below: Mesa's own declarations in glapi.h stay valid C, `T *(*f())` declares the accessor),
+ * EGL's thread state, qsort_r's comparator and call_once's argument (build_mesa_symbian.py PATCH). A process has
+ * several GL threads -- the window server runs the GPU composer and the OpenVG renderer's GL threads -- and as
+ * per-process globals one thread's eglMakeCurrent replaced every other thread's context (2026-10-29, GPU mode black).
+ * What stays per process: u_debug's and os_misc's formatting scratch buffers (debug output only). */
 #define thread_local
 #define _Thread_local
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+struct _glapi_table;
+struct _glapi_table **sym_glapi_dispatch(void);
+void **sym_glapi_context(void);
+#ifdef __cplusplus
+}
+#endif
+#define _mesa_glapi_tls_Dispatch (*sym_glapi_dispatch())
+#define _mesa_glapi_tls_Context (*sym_glapi_context())
 
 /* C11 bits the 2010 stdapis headers predate */
 #if !defined(__cplusplus) && !defined(static_assert)

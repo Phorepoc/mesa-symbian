@@ -70,12 +70,59 @@ PATCH = {
     "libmesa_util": {
         # the OS sysinfo header blocks (two) end in #error for an unknown OS; Symbian needs none of them
         "os_misc.c": [("#else\n#error unexpected platform in os_sysinfo.c\n", "#else\n/* Symbian (OURS): none */\n")],
-        # <thread> (gthreads) is not needed for the two thread_locals (per-process globals on Symbian, mesa_symbian.h)
-        "u_qsort.cpp": [("#include <thread>\n", "")],
+        # thread-locals -> the calling thread's slot (mesa_symbian.h, symgl_thread_slot): qsort_r's comparator and
+        # call_once's argument (shader compiles run on several GL threads of one process)
+        "u_qsort.cpp": [("#include <thread>\n", '#include "symgl_native.h"\n'),
+                        ("thread_local int (*tl_qsort_r_compar)(const void *, const void *, void *);\n"
+                         "thread_local void *tl_qsort_r_arg;\n",
+                         "/* OURS (Symbian): per-thread slot */\n"
+                         "struct sym_qsort_tls { int (*compar)(const void *, const void *, void *); void *arg; };\n"
+                         "#define sym_qsort_tls_get() ((sym_qsort_tls *)symgl_thread_slot(SYMGL_SLOT_QSORT, "
+                         "sizeof(sym_qsort_tls)))\n"
+                         "#define tl_qsort_r_compar (sym_qsort_tls_get()->compar)\n"
+                         "#define tl_qsort_r_arg (sym_qsort_tls_get()->arg)\n")],
+        "u_call_once.c": [("#include \"u_call_once.h\"\n", "#include \"u_call_once.h\"\n#include \"symgl_native.h\"\n"),
+                          ("static thread_local struct util_call_once_context_t call_once_context;\n",
+                           "/* OURS (Symbian): per-thread slot */\n"
+                           "#define call_once_context (*(struct util_call_once_context_t *)symgl_thread_slot("
+                           "SYMGL_SLOT_CALL_ONCE, sizeof(struct util_call_once_context_t)))\n")],
         # Mesa's default log = stderr (nowhere in a Symbian GUI process) -> syslog = RDebug (symbian/include/syslog.h)
         "log.c": [("#else\n      mesa_log_control |= MESA_LOG_CONTROL_FILE;\n#endif",
                    "#elif DETECT_OS_SYMBIAN\n      mesa_log_control |= MESA_LOG_CONTROL_SYSLOG;\n"
                    "#else\n      mesa_log_control |= MESA_LOG_CONTROL_FILE;\n#endif")],
+    },
+    # glapi's current dispatch + context: the calling thread's slot (mesa_symbian.h maps the variable names to these)
+    "libglapi": {
+        "core.c": [("__THREAD_INITIAL_EXEC struct _glapi_table *_mesa_glapi_tls_Dispatch\n"
+                    "   = (struct _glapi_table *)table_noop_array;\n"
+                    "__THREAD_INITIAL_EXEC void *_mesa_glapi_tls_Context;\n",
+                    "/* OURS (Symbian): per-thread slots (mesa_symbian.h); a thread with no dispatch yet = the no-op table */\n"
+                    "#include \"symgl_native.h\"\n"
+                    "struct sym_glapi_tls { struct _glapi_table *dispatch; void *context; };\n"
+                    "static struct _glapi_table *sym_glapi_none;\n"
+                    "static void *sym_context_none;\n\n"
+                    "struct _glapi_table **\nsym_glapi_dispatch(void)\n{\n"
+                    "   struct sym_glapi_tls *t = symgl_thread_slot(SYMGL_SLOT_GLAPI, sizeof(*t));\n"
+                    "   if (!t) {\n      sym_glapi_none = (struct _glapi_table *)table_noop_array;\n"
+                    "      return &sym_glapi_none;\n   }\n"
+                    "   if (!t->dispatch)\n      t->dispatch = (struct _glapi_table *)table_noop_array;\n"
+                    "   return &t->dispatch;\n}\n\n"
+                    "void **\nsym_glapi_context(void)\n{\n"
+                    "   struct sym_glapi_tls *t = symgl_thread_slot(SYMGL_SLOT_GLAPI, sizeof(*t));\n"
+                    "   if (!t) {\n      sym_context_none = NULL;\n      return &sym_context_none;\n   }\n"
+                    "   return &t->context;\n}\n")],
+    },
+    # EGL's per-thread state (current context, last error, bound API): the calling thread's slot
+    "libegl_symbian": {
+        "eglcurrent.c": [("static __THREAD_INITIAL_EXEC _EGLThreadInfo _egl_TLS = {\n   .inited = false,\n};\n",
+                          "#include \"symgl_native.h\"   /* OURS (Symbian): per-thread slot */\n"
+                          "static _EGLThreadInfo sym_egl_oom;   /* out of memory: a shared fallback */\n"),
+                         ("   _EGLThreadInfo *current = &_egl_TLS;\n",
+                          "   _EGLThreadInfo *current = symgl_thread_slot(SYMGL_SLOT_EGL, sizeof(_EGLThreadInfo));\n"
+                          "   if (!current)\n      current = &sym_egl_oom;\n"),
+                         ("   _EGLThreadInfo *t = _eglGetCurrentThread();\n   t->inited = false;\n",
+                          "   /* OURS (Symbian): the thread's slots go (eglReleaseThread; no current context any more) */\n"
+                          "   symgl_thread_release();\n")],
     },
     "libsoftpipe": {
         # softpipe makes a texture tile cache per (shader stage, sampler view) up front: 6 x 128 x 256 KB = 192 MB,
@@ -362,6 +409,21 @@ def make_mirror(lib: str, srcdir: str) -> str:
     return dst
 
 
+def patch_file(lib: str, src: str, edits: list) -> str:
+    """The PATCH edits applied to a copy of src under <build>/mesa-build/arm/patched/<lib>/ (rewritten only when it
+    changes: mtimes drive the recompile check); returns the copy's path."""
+    text = open(src, encoding="utf-8").read()
+    for old, new in edits:
+        assert text.count(old) >= 1, (src, old)
+        text = text.replace(old, new)
+    patched = os.path.join(OUT, "patched", lib, os.path.basename(src))
+    os.makedirs(os.path.dirname(patched), exist_ok=True)
+    if not os.path.isfile(patched) or open(patched, encoding="utf-8").read() != text:
+        with open(patched, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+    return patched
+
+
 def lib_of(entry: dict) -> str | None:
     o = entry["output"]
     i = o.find(".a.p/")
@@ -401,17 +463,8 @@ def main() -> int:
             src = os.path.join(mirrors[lib][1], os.path.basename(src))   # (edits already applied in the mirror)
             edits = None
         if edits:
-            text = open(src, encoding="utf-8").read()
-            for old, new in edits:
-                assert text.count(old) >= 1, (src, old)
-                text = text.replace(old, new)
-            patched = os.path.join(OUT, "patched", lib, os.path.basename(src))
-            os.makedirs(os.path.dirname(patched), exist_ok=True)
-            if not os.path.isfile(patched) or open(patched, encoding="utf-8").read() != text:
-                with open(patched, "w", encoding="utf-8", newline="\n") as f:
-                    f.write(text)
             extra = ["-iquote", os.path.dirname(src)] + extra
-            src = patched
+            src = patch_file(lib, src, edits)
         rep = REPLACE.get(lib, {}).get(os.path.basename(src))
         if rep:
             # the replacement still finds the original's sibling headers ("foo.h")
@@ -431,7 +484,12 @@ def main() -> int:
                     break
         flags = [f"-I{i}" for i in p["incs"]] + list(dict.fromkeys(incs)) + list(dict.fromkeys(defs)) + p["defs"]
         for src in p["srcs"]:
-            jobs.append((lib, src, os.path.join(OUT, "obj", lib, os.path.basename(src) + ".o"), flags))
+            obj = os.path.join(OUT, "obj", lib, os.path.basename(src) + ".o")
+            edits = PATCH.get(lib, {}).get(os.path.basename(src))
+            if edits:
+                jobs.append((lib, patch_file(lib, src, edits), obj, ["-iquote", os.path.dirname(src)] + flags))
+            else:
+                jobs.append((lib, src, obj, flags))
     for lib, files in EXTRA.items():
         if lib in libs and lib in lib_flags:
             extra, d = lib_flags[lib]
