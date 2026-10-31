@@ -169,6 +169,29 @@ sym_destroy_surface(_EGLDisplay *disp, _EGLSurface *s)
    return EGL_TRUE;
 }
 
+/* eglQuerySurface(EGL_WIDTH/HEIGHT) of a window = the window's size NOW (EGL 1.4 3.5.6; the 2010 EGL did the same). The
+   size was fixed at eglCreateWindowSurface, but an app that creates its window surface while the screen is still in
+   portrait (360x640) and then has wserv rotate the screen mode (a landscape-only app: window 640x360) kept seeing the
+   portrait size and drew a portrait layout (glViewport(0,0,360,640)) into the landscape surface: a shifted, flipped
+   quarter of its frame. */
+static EGLBoolean
+sym_query_surface(_EGLDisplay *disp, _EGLSurface *s, EGLint attribute, EGLint *value)
+{
+   if (s->Type == EGL_WINDOW_BIT && (attribute == EGL_WIDTH || attribute == EGL_HEIGHT)) {
+      struct sym_egl_surface *surf = sym_egl_surface(s);
+      update_size(surf->fb);
+      if ((unsigned)s->Width != surf->fb->new_width || (unsigned)s->Height != surf->fb->new_height) {
+         char msg[96];
+         snprintf(msg, sizeof(msg), "[symgl] window surface size %dx%d -> %ux%u", s->Width, s->Height,
+                  surf->fb->new_width, surf->fb->new_height);
+         symgl_log(msg);
+         s->Width = surf->fb->new_width;
+         s->Height = surf->fb->new_height;
+      }
+   }
+   return _eglQuerySurface(disp, s, attribute, value);
+}
+
 static EGLBoolean
 sym_swap_buffers(_EGLDisplay *disp, _EGLSurface *s)
 {
@@ -1111,6 +1134,7 @@ const _EGLDriver _eglDriver = {
    .CreatePbufferSurface = sym_create_pbuffer_surface,
    .DestroySurface = sym_destroy_surface,
    .SwapBuffers = sym_swap_buffers,
+   .QuerySurface = sym_query_surface,
    .CreateSyncKHR = sym_create_sync,
    .DestroySyncKHR = sym_destroy_sync,
    .ClientWaitSyncKHR = sym_client_wait_sync,
