@@ -41,6 +41,7 @@ struct sym_buffer {
    int prime_fd;                         /* the surface chunk imported for the Mali, -1 = none */
    struct pipe_resource *slot[SYMGL_NBUF];
    int cur;
+   int preserve;                         /* EGL_SWAP_BEHAVIOR = EGL_BUFFER_PRESERVED: a present copies the frame forward */
    struct sym_dt_memory dt_mem[SYMGL_NBUF];
    /* G6b: an RSgImage pixmap surface (native_window == NULL): the image's resource is the (front) colour buffer;
     * prime_fd is its import (unimported with the buffer) */

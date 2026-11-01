@@ -20,6 +20,8 @@
 #include "util/format/u_format.h"
 #include "util/u_memory.h"
 #include "util/u_inlines.h"
+#include "util/u_box.h"
+#include "util/macros.h"
 #include "frontend/drm_driver.h"
 #include "state_tracker/st_context.h"
 
@@ -266,6 +268,15 @@ sym_present_st_framebuffer(struct sym_buffer *buffer, struct pipe_context *pipe)
    buffer->cur = symgl_window_acquire(buffer->native_window);
    if (buffer->fd >= 0)   /* the compositor's CPU read it, the GPU will write it */
       sym_drm_cache_sync(buffer->fd, buffer->prime_fd, buffer->surf.offset[buffer->cur], buffer->surf.buf_size, 1);
+   /* EGL_BUFFER_PRESERVED (EGL 1.4 3.9.1: the colour buffer survives the swap): the acquired slot holds a frame from
+      SYMGL_NBUF-1 swaps ago, so the frame just presented is copied into it on the GPU, queued before the next frame's
+      drawing (Qt's QGLWidget asks for preserved swaps and has no GL context without such a config) */
+   struct pipe_resource *src = buffer->slot[done], *dst = buffer->slot[buffer->cur];
+   if (buffer->preserve && src && dst && src != dst) {
+      struct pipe_box box;
+      u_box_2d(0, 0, MIN2(src->width0, dst->width0), MIN2(src->height0, dst->height0), &box);
+      pipe->resource_copy_region(pipe, dst, 0, 0, 0, 0, src, 0, &box);
+   }
    /* the next frame's back buffer; st revalidates the framebuffer (the stamp) and binds it */
    pipe_resource_reference(&buffer->textures[ST_ATTACHMENT_BACK_LEFT], buffer->slot[buffer->cur]);
    pipe_resource_reference(&buffer->textures[ST_ATTACHMENT_FRONT_LEFT], buffer->slot[done]);

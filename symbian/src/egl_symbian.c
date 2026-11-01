@@ -217,6 +217,7 @@ sym_swap_buffers(_EGLDisplay *disp, _EGLSurface *s)
       screen->fence_finish(screen, NULL, fence, OS_TIMEOUT_INFINITE);
       screen->fence_reference(screen, &fence, NULL);
    }
+   buffer->preserve = s->SwapBehavior == EGL_BUFFER_PRESERVED;
    sym_present_st_framebuffer(buffer, st->pipe);
    update_size(buffer);
    st_context_invalidate_state(st, ST_INVALIDATE_FB_STATE);
@@ -256,7 +257,10 @@ sym_add_config(_EGLDisplay *disp, EGLint id, EGLint alpha, EGLint rgb565)
    conf->base.MaxPbufferHeight = _EGL_MAX_PBUFFER_HEIGHT;
    conf->base.MaxPbufferPixels = _EGL_MAX_PBUFFER_WIDTH * _EGL_MAX_PBUFFER_HEIGHT;
    /* G6b: pixmaps are RSgImages; the 16 bit config exists for RGB_565 images only (the window buffers are 32 bit) */
-   conf->base.SurfaceType = rgb565 ? EGL_PIXMAP_BIT : EGL_WINDOW_BIT | EGL_PBUFFER_BIT | EGL_PIXMAP_BIT;
+   /* EGL_SWAP_BEHAVIOR_PRESERVED_BIT: a window surface may ask for EGL_BUFFER_PRESERVED (sym_present_st_framebuffer
+      copies the frame forward); the default stays EGL_BUFFER_DESTROYED */
+   conf->base.SurfaceType = rgb565 ? EGL_PIXMAP_BIT
+                                   : EGL_WINDOW_BIT | EGL_PBUFFER_BIT | EGL_PIXMAP_BIT | EGL_SWAP_BEHAVIOR_PRESERVED_BIT;
    if (!_eglValidateConfig(&conf->base, EGL_FALSE)) {
       _eglLog(_EGL_WARNING, "symbian: config %d did not validate", id);
       free(conf);
