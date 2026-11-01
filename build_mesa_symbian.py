@@ -211,7 +211,18 @@ PATCH = {
                        "         goto err_out0;\n"
                        "   }\n")],
         "lima_fence.c": [("      close(fence->fd);", "      sym_drm_close_fd(fence->fd);")],
-        "lima_job.c": [("      close(ctx->in_sync_fd);", "      sym_drm_close_fd(ctx->in_sync_fd);")],
+        "lima_job.c": [("      close(ctx->in_sync_fd);", "      sym_drm_close_fd(ctx->in_sync_fd);"),
+                       # TEMP (GPU arena growth hunt): how many jobs wait in the context's hash (each holds its framebuffer's
+                       # buffers and its stream uploads until it is flushed)
+                       ("   _mesa_hash_table_insert(ctx->jobs, &job->key, job);\n\n   return job;\n",
+                        "   _mesa_hash_table_insert(ctx->jobs, &job->key, job);\n"
+                        "   {\n"
+                        "      static unsigned sym_jobs_logged;\n"
+                        "      const unsigned sym_n = _mesa_hash_table_num_entries(ctx->jobs);\n"
+                        "      if (sym_n >= 16 && (sym_n & 15) == 0 && sym_jobs_logged++ < 60)\n"
+                        "         mesa_logw(\"lima: %u jobs pending in context %p\", sym_n, (void *)ctx);\n"
+                        "   }\n\n   return job;\n"),
+                       ('#include "lima_job.h"\n', '#include "lima_job.h"\n#include "util/log.h"\n')],
         # no shader disk cache on Symbian (util's disk_cache.c is dropped; its header stubs the calls) and no ELF
         # build-id note to key it by
         "lima_disk_cache.c": [("   const struct build_id_note *note =\n"
