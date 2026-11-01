@@ -50,6 +50,7 @@ struct bo {
    int heap;                  /* a growable GP tile heap (LIMA_BO_FLAG_HEAP): only its first pages are committed */
    int import;                /* imported: the import index + 1, else 0 */
    uint32_t last_any[2], last_write[2];   /* the newest job of each pipe that reads / writes it */
+   uintptr_t owner;           /* TEMP (arena growth hunt): the creating thread */
 };
 
 struct import {
@@ -491,14 +492,35 @@ gem_create(struct dev *d, struct drm_lima_gem_create *req)
    }
    req->handle = h;
    req->size = b->size;
+   b->owner = (uintptr_t)thrd_current();
    if (!heap) {
       d->live_n++;
       d->live_kb += b->size >> 10;
       if (d->live_kb > d->peak_kb)
          d->peak_kb = d->live_kb;
-      if ((++d->creates & 1023) == 0)
+      if ((++d->creates & 1023) == 0) {
          shimlog("[symdrm] buffers: %u created, %u live = %u KB (peak %u KB), arena committed %u KB, heaps from %u KB",
                  d->creates, d->live_n, d->live_kb, d->peak_kb, d->committed >> 10, d->heap_low >> 10);
+         /* TEMP (arena growth hunt): live buffers by creating thread (the current one = the allocator now) */
+         uintptr_t ow[4] = {0};
+         uint32_t on[4] = {0}, ok[4] = {0};
+         for (int i = 1; i <= MAX_BO; i++) {
+            const struct bo *x = &d->bos[i];
+            if (!x->used || x->import || x->heap)
+               continue;
+            int k = 0;
+            while (k < 4 && ow[k] && ow[k] != x->owner)
+               k++;
+            if (k == 4)
+               continue;
+            ow[k] = x->owner;
+            on[k]++;
+            ok[k] += x->size >> 10;
+         }
+         shimlog("[symdrm]   by thread (now %lx): %lx %u = %u KB | %lx %u = %u KB | %lx %u = %u KB | %lx %u = %u KB",
+                 (unsigned long)thrd_current(), (unsigned long)ow[0], on[0], ok[0], (unsigned long)ow[1], on[1], ok[1],
+                 (unsigned long)ow[2], on[2], ok[2], (unsigned long)ow[3], on[3], ok[3]);
+      }
    }
    return 0;
 }
