@@ -443,10 +443,23 @@ gem_create(struct dev *d, struct drm_lima_gem_create *req)
          if (d->free_list[i].size > big)
             big = d->free_list[i].size;
       }
+      uint32_t live = 0, liveb = 0, heaps = 0, big1 = 0, big4 = 0;
+      for (int h = 1; h <= MAX_BO; h++)
+         if (d->bos[h].used && !d->bos[h].import) {
+            if (d->bos[h].heap) {
+               heaps++;
+               continue;
+            }
+            live++;
+            liveb += d->bos[h].size;
+            big1 += d->bos[h].size >= 0x100000;
+            big4 += d->bos[h].size >= 0x400000;
+         }
       if (d->errors++ < 16)
-         shimlog("[symdrm] gem_create %u KB%s failed %d: arena free %u KB in %d ranges (largest %u KB), committed %u KB, heaps from %u KB",
+         shimlog("[symdrm] gem_create %u KB%s failed %d: arena free %u KB in %d ranges (largest %u KB), committed %u KB, heaps from %u KB; "
+                 "live %u BOs %u KB (%u >= 1 MB, %u >= 4 MB), %u heaps",
                  req->size >> 10, heap ? " (tile heap)" : "", r, freeb >> 10, d->nfree, big >> 10, d->committed >> 10,
-                 d->heap_low >> 10);
+                 d->heap_low >> 10, live, liveb >> 10, big1, big4, heaps);
       return r;
    }
    struct bo *b = &d->bos[h];
