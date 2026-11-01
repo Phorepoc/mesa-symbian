@@ -517,6 +517,39 @@ gem_create(struct dev *d, struct drm_lima_gem_create *req)
             on[k]++;
             ok[k] += x->size >> 10;
          }
+         /* TEMP (arena growth hunt): the commonest live sizes */
+         {
+            uint32_t sz[48] = {0}, cn[48] = {0};
+            int ns = 0;
+            for (int i = 1; i <= MAX_BO; i++) {
+               const struct bo *x = &d->bos[i];
+               if (!x->used || x->import || x->heap)
+                  continue;
+               int k = 0;
+               while (k < ns && sz[k] != x->size)
+                  k++;
+               if (k == ns) {
+                  if (ns == 48)
+                     continue;
+                  sz[ns++] = x->size;
+               }
+               cn[k]++;
+            }
+            char line[400];
+            int pos = 0;
+            for (int t = 0; t < 10 && pos < 360; t++) {
+               int best = -1;
+               for (int k = 0; k < ns; k++)
+                  if (cn[k] && (best < 0 || cn[k] * (uint64_t)sz[k] > cn[best] * (uint64_t)sz[best]))
+                     best = k;
+               if (best < 0)
+                  break;
+               pos += snprintf(line + pos, sizeof(line) - pos, " %ux%u", cn[best], sz[best]);
+               cn[best] = 0;
+            }
+            line[pos] = 0;
+            shimlog("[symdrm]   top sizes (count x bytes, of %d distinct):%s", ns, line);
+         }
          shimlog("[symdrm]   by thread (now %lx): %lx %u = %u KB | %lx %u = %u KB | %lx %u = %u KB | %lx %u = %u KB",
                  (unsigned long)thrd_current(), (unsigned long)ow[0], on[0], ok[0], (unsigned long)ow[1], on[1], ok[1],
                  (unsigned long)ow[2], on[2], ok[2], (unsigned long)ow[3], on[3], ok[3]);
