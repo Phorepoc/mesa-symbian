@@ -434,8 +434,19 @@ gem_create(struct dev *d, struct drm_lima_gem_create *req)
          size >>= 2;
    } else
       r = arena_alloc(d, size, &off);
-   if (r)
+   if (r) {
+      uint32_t big = 0, freeb = 0;
+      for (int i = 0; i < d->nfree; i++) {
+         freeb += d->free_list[i].size;
+         if (d->free_list[i].size > big)
+            big = d->free_list[i].size;
+      }
+      if (d->errors++ < 16)
+         shimlog("[symdrm] gem_create %u KB%s failed %d: arena free %u KB in %d ranges (largest %u KB), committed %u KB, heaps from %u KB",
+                 req->size >> 10, heap ? " (tile heap)" : "", r, freeb >> 10, d->nfree, big >> 10, d->committed >> 10,
+                 d->heap_low >> 10);
       return r;
+   }
    struct bo *b = &d->bos[h];
    memset(b, 0, sizeof(*b));
    b->used = 1;
