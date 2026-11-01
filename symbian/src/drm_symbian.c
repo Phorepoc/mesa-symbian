@@ -428,7 +428,7 @@ gem_create(struct dev *d, struct drm_lima_gem_create *req)
    uint32_t size = req->size;
    int r;
    /* Linux reserves 16 MB per heap; a context has two (one per PLB) and a process may have several contexts, all inside
-      our 128 MB per-process arena next to every other GPU buffer: 8 MB each (the kernel bounds the GP by the reservation) */
+      our 256 MB per-process arena next to every other GPU buffer: 8 MB each (the kernel bounds the GP by the reservation) */
    if (heap && size > 0x800000)
       size = 0x800000;
    if (heap) {
