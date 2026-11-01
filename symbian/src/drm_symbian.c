@@ -80,6 +80,7 @@ static struct dev {
    struct import imports[MAX_IMPORT];
    uint32_t submitted[2], completed[2];
    int errors;
+   uint32_t creates, live_n, live_kb, peak_kb;   /* arena BOs (not heaps / imports): a periodic trend line */
 } the_dev;
 
 static void
@@ -490,6 +491,15 @@ gem_create(struct dev *d, struct drm_lima_gem_create *req)
    }
    req->handle = h;
    req->size = b->size;
+   if (!heap) {
+      d->live_n++;
+      d->live_kb += b->size >> 10;
+      if (d->live_kb > d->peak_kb)
+         d->peak_kb = d->live_kb;
+      if ((++d->creates & 1023) == 0)
+         shimlog("[symdrm] buffers: %u created, %u live = %u KB (peak %u KB), arena committed %u KB, heaps from %u KB",
+                 d->creates, d->live_n, d->live_kb, d->peak_kb, d->committed >> 10, d->heap_low >> 10);
+   }
    return 0;
 }
 
@@ -508,6 +518,8 @@ gem_close(struct dev *d, uint32_t handle)
       heap_release(d, b);
    } else {
       arena_free(d, b->arena_off, b->size);
+      d->live_n--;
+      d->live_kb -= b->size >> 10;
    }
    b->used = 0;
    return 0;
