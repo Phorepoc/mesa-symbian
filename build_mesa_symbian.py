@@ -210,6 +210,14 @@ PATCH = {
                        "      if (drmIoctl(screen->fd, DRM_IOCTL_LIMA_GEM_CREATE, &req))\n"
                        "         goto err_out0;\n"
                        "   }\n")],
+        # a reload (or blit) into a multisampled framebuffer wrote sample 0 only: draws set msaa = 0xd on one (lima_draw.c),
+        # the blit's render state never did. A render-to-texture framebuffer writes its samples back to one address (the
+        # texture has one sample), the last -- still the clear colour: after a mid-frame submit everything drawn before it
+        # was lost (the app grid scrolled black, the scrollbar drawn after it stayed).
+        "lima_blit.c": [("      state.sample_mask = sample_mask;\n",
+                         "      state.sample_mask = sample_mask;\n"
+                         "      if (ctx->framebuffer.base.samples > 1)   /* OURS (Symbian): as lima_draw.c */\n"
+                         "         state.msaa = 0xd;\n")],
         "lima_fence.c": [("      close(fence->fd);", "      sym_drm_close_fd(fence->fd);")],
         "lima_job.c": [("      close(ctx->in_sync_fd);", "      sym_drm_close_fd(ctx->in_sync_fd);"),
                        # TEMP (GPU arena growth hunt): how many jobs wait in the context's hash (each holds its framebuffer's
