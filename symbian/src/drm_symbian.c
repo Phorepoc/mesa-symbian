@@ -444,6 +444,8 @@ gem_create(struct dev *d, struct drm_lima_gem_create *req)
             big = d->free_list[i].size;
       }
       uint32_t live = 0, liveb = 0, heaps = 0, big1 = 0, big4 = 0;
+      /* sizes up to 16 KB, 64 KB, 256 KB, 1 MB, 4 MB, more: count and KB */
+      uint32_t hn[6] = {0}, hk[6] = {0};
       for (int h = 1; h <= MAX_BO; h++)
          if (d->bos[h].used && !d->bos[h].import) {
             if (d->bos[h].heap) {
@@ -452,6 +454,12 @@ gem_create(struct dev *d, struct drm_lima_gem_create *req)
             }
             live++;
             liveb += d->bos[h].size;
+            {
+               const uint32_t z = d->bos[h].size;
+               const int k = z <= 0x4000 ? 0 : z <= 0x10000 ? 1 : z <= 0x40000 ? 2 : z <= 0x100000 ? 3 : z <= 0x400000 ? 4 : 5;
+               hn[k]++;
+               hk[k] += z >> 10;
+            }
             big1 += d->bos[h].size >= 0x100000;
             big4 += d->bos[h].size >= 0x400000;
          }
@@ -460,6 +468,9 @@ gem_create(struct dev *d, struct drm_lima_gem_create *req)
                  "live %u BOs %u KB (%u >= 1 MB, %u >= 4 MB), %u heaps",
                  req->size >> 10, heap ? " (tile heap)" : "", r, freeb >> 10, d->nfree, big >> 10, d->committed >> 10,
                  d->heap_low >> 10, live, liveb >> 10, big1, big4, heaps);
+      if (d->errors <= 16)
+         shimlog("[symdrm]   live by size: <=16K %u (%u KB), <=64K %u (%u KB), <=256K %u (%u KB), <=1M %u (%u KB), <=4M %u (%u KB), more %u (%u KB)",
+                 hn[0], hk[0], hn[1], hk[1], hn[2], hk[2], hn[3], hk[3], hn[4], hk[4], hn[5], hk[5]);
       return r;
    }
    struct bo *b = &d->bos[h];

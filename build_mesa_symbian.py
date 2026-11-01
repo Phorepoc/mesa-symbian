@@ -191,7 +191,25 @@ PATCH = {
                       ("      bo->map = os_mmap(0, bo->size, PROT_READ | PROT_WRITE,\n"
                        "                        MAP_SHARED, bo->screen->fd, bo->offset);",
                        "      bo->map = sym_drm_mmap(bo->screen->fd, bo->offset, bo->size);"),
-                      ("      os_munmap(bo->map, bo->size);", "      sym_drm_munmap(bo->map, bo->size);")],
+                      ("      os_munmap(bo->map, bo->size);", "      sym_drm_munmap(bo->map, bo->size);"),
+                      # the GPU address space is a fixed per-process arena here (not system RAM, as on Linux): the BO
+                      # cache's idle buffers (kept 6 s) can hold tens of MB of it while a scroll churns textures, and an
+                      # allocation then fails -- which lima does not survive. On failure: free the cache, try again.
+                      ("   if (drmIoctl(screen->fd, DRM_IOCTL_LIMA_GEM_CREATE, &req))\n      goto err_out0;\n",
+                       "   if (drmIoctl(screen->fd, DRM_IOCTL_LIMA_GEM_CREATE, &req)) {\n"
+                       "      /* OURS (Symbian): the arena is full -- release the BO cache's idle buffers and retry once */\n"
+                       "      mtx_lock(&screen->bo_cache_lock);\n"
+                       "      list_for_each_entry_safe(struct lima_bo, entry, &screen->bo_cache_time, time_list) {\n"
+                       "         lima_bo_cache_remove(entry);\n"
+                       "         lima_bo_free(entry);\n"
+                       "      }\n"
+                       "      mtx_unlock(&screen->bo_cache_lock);\n"
+                       "      req.size = size;\n"
+                       "      req.flags = flags;\n"
+                       "      req.handle = 0;\n"
+                       "      if (drmIoctl(screen->fd, DRM_IOCTL_LIMA_GEM_CREATE, &req))\n"
+                       "         goto err_out0;\n"
+                       "   }\n")],
         "lima_fence.c": [("      close(fence->fd);", "      sym_drm_close_fd(fence->fd);")],
         "lima_job.c": [("      close(ctx->in_sync_fd);", "      sym_drm_close_fd(ctx->in_sync_fd);")],
         # no shader disk cache on Symbian (util's disk_cache.c is dropped; its header stubs the calls) and no ELF
