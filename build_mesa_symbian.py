@@ -183,64 +183,7 @@ PATCH = {
     # lima's few OS calls that are not drmIoctl: imported-buffer size (lseek on a dma-buf), BO CPU mappings (mmap of
     # the DRM fd), closing sync files -- all routed to the shim (symbian/src/drm_symbian.c, symbian/include/xf86drm.h)
     "liblima": {
-        # a job keeps every draw's vertex-output buffer (gp_output, one per draw, up to ~100 KB) until it is submitted, and
-        # a job may hold 2500 draws: on Linux that is system RAM, here it is the fixed per-process GPU arena -- a few
-        # shadows drawn for a while filled it (scrolling a full app grid). OURS: a job is also submitted once its vertex
-        # outputs pass 8 MB, or 1 MB while all pending jobs together hold more than 32 MB -- the same split lima makes at
-        # its draws-per-job limit (the next job reloads what this one wrote).
-        "lima_draw.c": [('#include "lima_job.h"\n',
-                         '#include "lima_job.h"\n#include "util/log.h"\n#include "util/simple_mtx.h"\n'
-                         '/* OURS (Symbian): vertex-output bytes held by each pending job (lima_job_free calls\n'
-                         ' * sym_lima_job_gone) */\n'
-                         '#define SYM_JOB_SLOTS 512\n'
-                         '#define SYM_JOB_OUT_MAX (8u << 20)\n'
-                         '#define SYM_ALL_OUT_MAX (32u << 20)\n'
-                         '#define SYM_JOB_OUT_MIN (1u << 20)\n'
-                         'static simple_mtx_t sym_out_lock = SIMPLE_MTX_INITIALIZER;\n'
-                         'static struct { const void *job; uint32_t bytes; } sym_out[SYM_JOB_SLOTS];\n'
-                         'static uint32_t sym_out_total;\n'
-                         'static void sym_job_out_add(const void *job, uint32_t bytes)\n'
-                         '{\n'
-                         '   simple_mtx_lock(&sym_out_lock);\n'
-                         '   int f = -1;\n'
-                         '   for (int i = 0; i < SYM_JOB_SLOTS; i++) {\n'
-                         '      if (sym_out[i].job == job) { f = i; break; }\n'
-                         '      if (f < 0 && !sym_out[i].job) f = i;\n'
-                         '   }\n'
-                         '   if (f >= 0) {\n'
-                         '      sym_out[f].job = job;\n'
-                         '      sym_out[f].bytes += bytes;\n'
-                         '      sym_out_total += bytes;\n'
-                         '   }\n'
-                         '   simple_mtx_unlock(&sym_out_lock);\n'
-                         '}\n'
-                         'static bool sym_job_out_full(const void *job)\n'
-                         '{\n'
-                         '   uint32_t b = 0;\n'
-                         '   simple_mtx_lock(&sym_out_lock);\n'
-                         '   for (int i = 0; i < SYM_JOB_SLOTS; i++)\n'
-                         '      if (sym_out[i].job == job) { b = sym_out[i].bytes; break; }\n'
-                         '   const bool full = b > SYM_JOB_OUT_MAX || (sym_out_total > SYM_ALL_OUT_MAX && b > SYM_JOB_OUT_MIN);\n'
-                         '   simple_mtx_unlock(&sym_out_lock);\n'
-                         '   return full;\n'
-                         '}\n'
-                         'void sym_lima_job_gone(const void *job)\n'
-                         '{\n'
-                         '   simple_mtx_lock(&sym_out_lock);\n'
-                         '   for (int i = 0; i < SYM_JOB_SLOTS; i++)\n'
-                         '      if (sym_out[i].job == job) {\n'
-                         '         sym_out_total -= sym_out[i].bytes;\n'
-                         '         sym_out[i].job = NULL;\n'
-                         '         sym_out[i].bytes = 0;\n'
-                         '         break;\n'
-                         '      }\n'
-                         '   simple_mtx_unlock(&sym_out_lock);\n'
-                         '}\n'),
-                        ('   ctx->gp_output = lima_bo_create(screen, gp_output_size, 0);\n   assert(ctx->gp_output);\n',
-                         '   ctx->gp_output = lima_bo_create(screen, gp_output_size, 0);\n   assert(ctx->gp_output);\n'
-                         '   sym_job_out_add(job, ctx->gp_output->size);   /* OURS (Symbian) */\n'),
-                        ('   if (job->draws > MAX_DRAWS_PER_JOB) {\n',
-                         '   if (job->draws > MAX_DRAWS_PER_JOB || sym_job_out_full(job)) {   /* OURS (Symbian): + output bound */\n'),
+        "lima_draw.c": [('#include "lima_job.h"\n', '#include "lima_job.h"\n#include "util/log.h"\n'),
                         ('      struct pipe_vertex_buffer *pvb = vb->vb + pve->vertex_buffer_index;\n      struct lima_resource *res = lima_resource(pvb->buffer.resource);\n\n      lima_job_add_bo(job, LIMA_PIPE_GP, res->bo, LIMA_SUBMIT_BO_READ);\n',
                          '      struct pipe_vertex_buffer *pvb = vb->vb + pve->vertex_buffer_index;\n      struct lima_resource *res = lima_resource(pvb->buffer.resource);\n\n      if (!res) {\n         /* OURS (Symbian): a vertex element whose buffer slot holds no resource (Dungeon Hunter 2, GLES1: user crash at\n          * lima_draw.c, release build has the asserts above compiled out). Point the attribute at the (always valid)\n          * vertex shader BO with stride 0 instead of dereferencing NULL. */\n         static unsigned lima_null_vb_warned;\n         if (!lima_null_vb_warned++)\n            mesa_loge("lima: draw with an empty vertex buffer slot %u (count %u, mask %x): attribute %d dropped",\n                      pve->vertex_buffer_index, vb->count, vb->enabled_mask, i);\n         attribute[n++] = ctx->vs->bo->va;\n         attribute[n++] = (lima_pipe_format_to_attrib_type(pve->src_format) << 2) |\n            (util_format_get_nr_components(pve->src_format) - 1);\n         continue;\n      }\n\n      lima_job_add_bo(job, LIMA_PIPE_GP, res->bo, LIMA_SUBMIT_BO_READ);\n')],
         "lima_bo.c": [("      size = lseek(h, 0, SEEK_END);", "      size = sym_drm_fd_size(h);"),
@@ -279,10 +222,7 @@ PATCH = {
                         "      if (sym_n >= 16 && (sym_n & 15) == 0 && sym_jobs_logged++ < 60)\n"
                         "         mesa_logw(\"lima: %u jobs pending in context %p\", sym_n, (void *)ctx);\n"
                         "   }\n\n   return job;\n"),
-                       ('#include "lima_job.h"\n', '#include "lima_job.h"\n#include "util/log.h"\n'
-                        'void sym_lima_job_gone(const void *job);   /* OURS (Symbian): lima_draw.c */\n'),
-                       ("lima_job_free(struct lima_job *job)\n{\n",
-                        "lima_job_free(struct lima_job *job)\n{\n   sym_lima_job_gone(job);\n")],
+                       ('#include "lima_job.h"\n', '#include "lima_job.h"\n#include "util/log.h"\n')],
         # no shader disk cache on Symbian (util's disk_cache.c is dropped; its header stubs the calls) and no ELF
         # build-id note to key it by
         "lima_disk_cache.c": [("   const struct build_id_note *note =\n"
