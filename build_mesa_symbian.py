@@ -222,7 +222,14 @@ PATCH = {
                         "      if (sym_n >= 16 && (sym_n & 15) == 0 && sym_jobs_logged++ < 60)\n"
                         "         mesa_logw(\"lima: %u jobs pending in context %p\", sym_n, (void *)ctx);\n"
                         "   }\n\n   return job;\n"),
-                       ('#include "lima_job.h"\n', '#include "lima_job.h"\n#include "util/log.h"\n')],
+                       ('#include "lima_job.h"\n', '#include "lima_job.h"\n#include "util/log.h"\n'),
+                       # EXT_multisampled_render_to_texture: the framebuffer has 4 samples but the texture 1 (the samples
+                       # live in tile memory only). Reloading it after a flush blitted "sample i" of the 1-sample texture
+                       # into sample i: samples 1-3 came back black (a scrolled app grid flashed black once phvg flushed
+                       # between commands). A single-sample source reloads into all samples, as the 1x path does.
+                       ("   if (ctx->framebuffer.base.samples > 1) {\n      for (int i = 0; i < LIMA_MAX_SAMPLES; i++) {\n",
+                        "   if (ctx->framebuffer.base.samples > 1 && psurf->texture->nr_samples > 1) {   /* OURS: see above */\n"
+                        "      for (int i = 0; i < LIMA_MAX_SAMPLES; i++) {\n")],
         # no shader disk cache on Symbian (util's disk_cache.c is dropped; its header stubs the calls) and no ELF
         # build-id note to key it by
         "lima_disk_cache.c": [("   const struct build_id_note *note =\n"
