@@ -47,6 +47,7 @@ struct bo {
    uint32_t size, va;
    void *cpu;
    uint32_t arena_off;        /* arena BOs */
+   int heap;                  /* a growable GP tile heap (LIMA_BO_FLAG_HEAP): only its first pages are committed */
    int import;                /* imported: the import index + 1, else 0 */
    uint32_t last_any[2], last_write[2];   /* the newest job of each pipe that reads / writes it */
 };
@@ -68,6 +69,7 @@ static struct dev {
    symgpu_t *m;
    symgpu_info_t info;
    uint32_t committed;
+   uint32_t heap_low;         /* the lowest arena offset of a live tile heap (arena_max = none): the linear commit stays below */
    struct range free_list[MAX_FREE];
    int nfree;
    struct bo bos[MAX_BO + 1];             /* handle = index, 0 unused */
@@ -201,10 +203,14 @@ arena_alloc(struct dev *d, uint32_t size, uint32_t *off)
          continue;
       uint32_t o = r->off;
       uint32_t end = o + size;
+      if (end > d->heap_low)
+         continue;
       if (end > d->committed) {
          uint32_t want = (end + COMMIT_STEP - 1) & ~(COMMIT_STEP - 1);
          if (want > d->info.arena_max)
             want = d->info.arena_max;
+         if (want > d->heap_low)
+            want = d->heap_low;
          int rc = symgpu_commit(d->m, d->committed, want - d->committed);
          if (rc != 0) {
             shimlog("[symdrm] arena commit %u+%u failed: %d", d->committed, want - d->committed, rc);
@@ -363,6 +369,54 @@ arena_read_probe(char *p)
    }
 }
 
+/* A growable tile heap (Linux lima: LIMA_BO_FLAG_HEAP). Its whole size is RESERVED at the top of the arena, but only
+   the first pages are committed; the kernel commits more, doubling, when a GP job runs out of tile memory, and resumes
+   the job. The part below the linear commit's high-water mark is committed already and stays so. */
+static int
+heap_reserve(struct dev *d, uint32_t size, uint32_t *off)
+{
+   size = (size + PAGE - 1) & ~(PAGE - 1);
+   int best = -1;
+   for (int i = 0; i < d->nfree; i++)
+      if (d->free_list[i].size >= size &&
+          (best < 0 || d->free_list[i].off + d->free_list[i].size > d->free_list[best].off + d->free_list[best].size))
+         best = i;
+   if (best < 0)
+      return -ENOMEM;
+   struct range *r = &d->free_list[best];
+   uint32_t o = r->off + r->size - size;
+   if (o < d->committed && d->committed - o > size)
+      return -ENOMEM;
+   r->size -= size;
+   if (r->size == 0) {
+      memmove(r, r + 1, (d->nfree - best - 1) * sizeof(*r));
+      d->nfree--;
+   }
+   uint32_t pre = o < d->committed ? d->committed - o : 0;
+   int rc = symgpu_heap_create(d->m, o, size, pre);
+   if (rc != 0) {
+      shimlog("[symdrm] tile heap %u KB at %u: %d", size >> 10, o, rc);
+      arena_free(d, o, size);
+      return -ENOMEM;
+   }
+   if (o < d->heap_low)
+      d->heap_low = o;
+   *off = o;
+   return 0;
+}
+
+static void
+heap_release(struct dev *d, struct bo *b)
+{
+   symgpu_heap_free(d->m, b->arena_off);
+   b->heap = 0;
+   arena_free(d, b->arena_off, b->size);
+   d->heap_low = d->info.arena_max;
+   for (int h = 1; h <= MAX_BO; h++)
+      if (d->bos[h].used && d->bos[h].heap && d->bos[h].arena_off < d->heap_low)
+         d->heap_low = d->bos[h].arena_off;
+}
+
 static int
 gem_create(struct dev *d, struct drm_lima_gem_create *req)
 {
@@ -370,19 +424,29 @@ gem_create(struct dev *d, struct drm_lima_gem_create *req)
    if (!h)
       return -ENOMEM;
    uint32_t off;
-   int r = arena_alloc(d, req->size, &off);
+   const int heap = (req->flags & LIMA_BO_FLAG_HEAP) != 0;
+   uint32_t size = req->size;
+   int r;
+   if (heap) {
+      /* a smaller reservation when the arena is short of address space: the kernel bounds the GP's window by what is
+         really reserved, whatever end the frame asks for */
+      while ((r = heap_reserve(d, size, &off)) != 0 && size > 0x100000)
+         size >>= 2;
+   } else
+      r = arena_alloc(d, size, &off);
    if (r)
       return r;
    struct bo *b = &d->bos[h];
    memset(b, 0, sizeof(*b));
    b->used = 1;
-   b->size = (req->size + PAGE - 1) & ~(PAGE - 1);
+   b->heap = heap;
+   b->size = (size + PAGE - 1) & ~(PAGE - 1);
    b->arena_off = off;
    b->va = d->info.arena_va + off;
    b->cpu = (char *)d->info.arena_base + off;
    {
       static int probed;
-      if (!probed && b->size >= 262144) {
+      if (!probed && !heap && b->size >= 262144) {
          probed = 1;
          arena_read_probe(b->cpu);
       }
@@ -403,6 +467,8 @@ gem_close(struct dev *d, uint32_t handle)
       struct import *im = &d->imports[b->import - 1];
       if (im->used && im->bo == (int)handle)
          im->bo = 0;
+   } else if (b->heap) {
+      heap_release(d, b);
    } else {
       arena_free(d, b->arena_off, b->size);
    }
@@ -543,7 +609,7 @@ drmIoctl_unlocked(int fd, unsigned long request, void *arg)
    return r ? fail(r) : 0;
 }
 
-static drmVersion the_version = { 1, 0, 0, 4, (char *)"lima", 0, (char *)"", 0, (char *)"" };
+static drmVersion the_version = { 1, 1, 0, 4, (char *)"lima", 0, (char *)"", 0, (char *)"" };
 
 static drmVersionPtr
 drmGetVersion_unlocked(int fd)
@@ -760,6 +826,7 @@ sym_drm_open_unlocked(void)
    d->free_list[0].off = 0;
    d->free_list[0].size = d->info.arena_max;
    d->nfree = 1;
+   d->heap_low = d->info.arena_max;
    shimlog("[symdrm] Mali GP %08x PP %08x x%d, arena %u MB at %08x", d->info.gp_version, d->info.pp_version,
         d->info.num_pp, d->info.arena_max >> 20, d->info.arena_va);
    return FD_BASE;
