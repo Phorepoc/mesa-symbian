@@ -114,12 +114,6 @@ PATCH = {
     },
     # EGL's per-thread state (current context, last error, bound API): the calling thread's slot
     "libegl_symbian": {
-        # TEMP (msrtt resolve probe): phvg sets lima's write-back mode for 4-sample render-to-texture framebuffers
-        "eglapi.c": [("   if (!procname)\n      RETURN_EGL_SUCCESS(NULL, NULL);\n",
-                      "   if (!procname)\n      RETURN_EGL_SUCCESS(NULL, NULL);\n"
-                      "   {\n      extern void sym_lima_wb_mode_set(int);\n"
-                      "      if (!strcmp(procname, \"symLimaWbMode\"))\n"
-                      "         RETURN_EGL_SUCCESS(NULL, (_EGLProc)sym_lima_wb_mode_set);\n   }\n")],
         "eglcurrent.c": [("static __THREAD_INITIAL_EXEC _EGLThreadInfo _egl_TLS = {\n   .inited = false,\n};\n",
                           "#include \"symgl_native.h\"   /* OURS (Symbian): per-thread slot */\n"
                           "static _EGLThreadInfo sym_egl_oom;   /* out of memory: a shared fallback */\n"),
@@ -226,30 +220,16 @@ PATCH = {
                          "         state.msaa = 0xd;\n")],
         "lima_fence.c": [("      close(fence->fd);", "      sym_drm_close_fd(fence->fd);")],
         "lima_job.c": [("      close(ctx->in_sync_fd);", "      sym_drm_close_fd(ctx->in_sync_fd);"),
-                       # TEMP (GPU arena growth hunt): how many jobs wait in the context's hash (each holds its framebuffer's
-                       # buffers and its stream uploads until it is flushed)
-                       ("   _mesa_hash_table_insert(ctx->jobs, &job->key, job);\n\n   return job;\n",
-                        "   _mesa_hash_table_insert(ctx->jobs, &job->key, job);\n"
-                        "   {\n"
-                        "      static unsigned sym_jobs_logged;\n"
-                        "      const unsigned sym_n = _mesa_hash_table_num_entries(ctx->jobs);\n"
-                        "      if (sym_n >= 16 && (sym_n & 15) == 0 && sym_jobs_logged++ < 60)\n"
-                        "         mesa_logw(\"lima: %u jobs pending in context %p\", sym_n, (void *)ctx);\n"
-                        "   }\n\n   return job;\n"),
-                       ('#include "lima_job.h"\n', '#include "lima_job.h"\n#include "util/log.h"\n'
-                        "int sym_lima_wb_mode;   /* TEMP (msrtt resolve probe) */\n"
-                        "void sym_lima_wb_mode_set(int m) { sym_lima_wb_mode = m; }\n"),
                        ("   unsigned nr_samples = cbuf->nr_samples ?\n"
                         "                         cbuf->nr_samples : MAX2(1, cbuf->texture->nr_samples);\n"
                         "   if (nr_samples > 1) {\n",
                         "   unsigned nr_samples = cbuf->nr_samples ?\n"
                         "                         cbuf->nr_samples : MAX2(1, cbuf->texture->nr_samples);\n"
-                        "   if (nr_samples > 1 && cbuf->texture->nr_samples <= 1 && sym_lima_wb_mode) {\n"
-                        "      /* TEMP (msrtt resolve probe) */\n"
-                        "      const int m = sym_lima_wb_mode;\n"
-                        "      wb[wb_idx].mrt_pitch = 0;\n"
-                        "      wb[wb_idx].mrt_bits = m == 5 ? 1 : (m >= 6 ? u_bit_consecutive(0, nr_samples) : 0);\n"
-                        "      wb[wb_idx].downsample_factor = m == 1 ? 0 : m == 2 ? 1 : m == 3 ? 2 : m == 4 ? 3 : m == 6 ? 1 : m == 7 ? 2 : 0;\n"
+                        "   if (nr_samples > 1 && cbuf->texture->nr_samples <= 1) {\n"
+                        "      /* OURS: EXT_multisampled_render_to_texture -- a 4-sample framebuffer on a 1-sample texture. Upstream\n"
+                        "       * wrote every sample (mrt_bits) at mrt_pitch 0 into the one image: the last sample won, no edge was\n"
+                        "       * smoothed. Without mrt_bits the write-back averages the tile's samples (measured on the A64's\n"
+                        "       * Mali-400: a diagonal edge matches exact coverage; downsample_factor 1-3 does not). */\n"
                         "   } else if (nr_samples > 1) {\n"),
                        # EXT_multisampled_render_to_texture: the framebuffer has 4 samples but the texture 1 (the samples
                        # live in tile memory only). Reloading it after a flush blitted "sample i" of the 1-sample texture
