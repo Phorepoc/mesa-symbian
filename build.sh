@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 # build.sh -- Mesa for ARM Symbian, start to end. Runs inside the toolchain's mesa image (ghcr.io/phorepoc/mesa),
-# with the Phorepoc core and pdk checkouts and a build directory where `ph source export` has made the include tree:
+# with the Phorepoc core and pdk checkouts and a build directory where `phe source export` has made the include tree:
 #
 #   PHOREPOC_CORE=../core PHOREPOC_PDK=../pdk PHOREPOC_BUILD=../core/build ./build.sh [-j N]
 #
