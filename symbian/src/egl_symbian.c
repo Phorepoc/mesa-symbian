@@ -541,12 +541,19 @@ sym_range_add(int prime, uint32_t off, uint32_t size)
    return sym_range_add_role(prime, off, size, SYM_RANGE_BOTH);
 }
 
-/* before = 1: the CPU wrote, the GPU will read/write; before = 0: the GPU wrote, the CPU will read */
+int sym_drm_import_bit(int prime_fd);
+
+/* before = 1: the CPU wrote, the GPU will read/write; before = 0: the GPU wrote, the CPU will read.
+ * imports = the imports concerned (drm_symbian.c sym_drm_sync_hook; ~0u = all); a range that is not an import is
+ * always synced */
 static void
-sym_ranges_sync(int fd, int before)
+sym_ranges_sync(int fd, int before, uint32_t imports)
 {
    for (int i = 0; i < SYM_MAX_RANGES; i++) {
       if (!sym_ranges[i].used)
+         continue;
+      const int bit = sym_drm_import_bit(sym_ranges[i].prime);
+      if (bit >= 0 && !(imports & (1u << bit)))
          continue;
       const int role = sym_ranges[i].role;
       int op;
@@ -806,19 +813,19 @@ sym_wait_native(EGLint engine)
    (void)engine;
    struct sym_egl_display *dpy = sym_the_disp ? sym_egl_display(sym_the_disp) : NULL;
    if (dpy && dpy->fd >= 0)
-      sym_ranges_sync(dpy->fd, 1);   /* the CPU wrote them, the GPU will read/write (sources: clean only) */
+      sym_ranges_sync(dpy->fd, 1, ~0u);   /* the CPU wrote them, the GPU will read/write (sources: clean only) */
    return EGL_TRUE;
 }
 
-/* drm_symbian.c calls it around every PP job (sym_drm_sync_hook) */
-extern void (*sym_drm_sync_hook)(int before);
+/* drm_symbian.c calls it around the PP jobs that use imports (sym_drm_sync_hook) */
+extern void (*sym_drm_sync_hook)(int before, uint32_t imports);
 static int sym_hook_fd = -1;
 
 static void
-sym_sync_hook(int before)
+sym_sync_hook(int before, uint32_t imports)
 {
    if (sym_hook_fd >= 0)
-      sym_ranges_sync(sym_hook_fd, before);
+      sym_ranges_sync(sym_hook_fd, before, imports);
 }
 
 static EGLBoolean

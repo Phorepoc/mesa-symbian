@@ -140,8 +140,21 @@ drm_unlock(void)
 /* egl_symbian.c's CPU cache maintenance of the registered images, tied to the jobs themselves: before = 1 right
  * ahead of every PP submit (the CPU's writes reach memory), 0 once a PP job finished (the CPU drops what it cached of
  * the GPU's output). EGL's eglWaitNative/eglWaitClient cannot carry it: they only reach the driver for a thread with a
- * current EGL context and surface, and the G8 composer has neither (its sources showed stale lines for that). */
-void (*sym_drm_sync_hook)(int before);
+ * current EGL context and surface, and the G8 composer has neither (its sources showed stale lines for that).
+ * `imports` (2026-11-02) = the imports concerned, bit i = import i (sym_drm_import_bit): before, the ones the job about
+ * to run reads or writes (its BO list); after, the ones the finished jobs wrote. It used to be every registered image
+ * around every PP job -- the composer's sources and phvg's targets live in one process (EWSRV), so each job cleaned and
+ * invalidated megabytes it never touched: ~10 % of WSERV's GL worker while scrolling. As dma-buf: maintenance on use. */
+void (*sym_drm_sync_hook)(int before, uint32_t imports);
+static uint32_t pp_written_imports;      /* imports written by PP jobs since the last "after" */
+
+/* a prime fd's bit in the hook's mask; -1 = not an import */
+int
+sym_drm_import_bit(int prime_fd)
+{
+   const int i = prime_fd - (FD_BASE + FD_IMPORT);
+   return i >= 0 && i < MAX_IMPORT ? i : -1;
+}
 
 static int
 pipe_finish(struct dev *d, int pipe, int poll)
@@ -152,8 +165,11 @@ pipe_finish(struct dev *d, int pipe, int poll)
    if (r == 1)
       return 1;
    d->completed[pipe] = d->submitted[pipe];
-   if (pipe == LIMA_PIPE_PP && sym_drm_sync_hook)
-      sym_drm_sync_hook(0);
+   if (pipe == LIMA_PIPE_PP) {
+      if (sym_drm_sync_hook && pp_written_imports)
+         sym_drm_sync_hook(0, pp_written_imports);
+      pp_written_imports = 0;
+   }
    if (r != 0 && d->errors++ < 8)
       shimlog("[symdrm] %s job #%u failed: %d", pipe ? "PP" : "GP", d->completed[pipe], r);
    return 0;
@@ -486,14 +502,25 @@ gem_submit(struct dev *d, struct drm_lima_gem_submit *req)
          pipe_finish(d, other, 0);
    }
 
-   if (pipe == LIMA_PIPE_PP && sym_drm_sync_hook)
-      sym_drm_sync_hook(1);
+   uint32_t used = 0, written = 0;      /* the imports this job reads / writes (the hook's masks) */
+   for (unsigned i = 0; i < req->nr_bos; i++) {
+      const struct bo *b = &d->bos[bos[i].handle];
+      if (b->import) {
+         used |= 1u << (b->import - 1);
+         if (bos[i].flags & LIMA_SUBMIT_BO_WRITE)
+            written |= 1u << (b->import - 1);
+      }
+   }
+   if (pipe == LIMA_PIPE_PP && sym_drm_sync_hook && used)
+      sym_drm_sync_hook(1, used);
    int r = symgpu_submit(d->m, pipe, frame, words);
    if (r != 0) {
       shimlog("[symdrm] submit %s failed: %d", pipe ? "PP" : "GP", r);
       return -EINVAL;
    }
    const uint32_t seq = ++d->submitted[pipe];
+   if (pipe == LIMA_PIPE_PP)
+      pp_written_imports |= written;
    for (unsigned i = 0; i < req->nr_bos; i++) {
       struct bo *b = &d->bos[bos[i].handle];
       b->last_any[pipe] = seq;

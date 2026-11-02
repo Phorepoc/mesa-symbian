@@ -228,8 +228,8 @@ PATCH = {
                         "   if (nr_samples > 1 && cbuf->texture->nr_samples <= 1) {\n"
                         "      /* OURS: EXT_multisampled_render_to_texture -- a 4-sample framebuffer on a 1-sample texture. Upstream\n"
                         "       * wrote every sample (mrt_bits) at mrt_pitch 0 into the one image: the last sample won, no edge was\n"
-                        "       * smoothed. Without mrt_bits the write-back averages the tile's samples (measured on the A64's\n"
-                        "       * Mali-400: a diagonal edge matches exact coverage; downsample_factor 1-3 does not). */\n"
+                        "       * smoothed. Without mrt_bits the write-back averages the tile's samples (measured on a\n"
+                        "       * Mali-400 MP2: a diagonal edge matches exact coverage; downsample_factor 1-3 does not). */\n"
                         "   } else if (nr_samples > 1) {\n"),
                        # EXT_multisampled_render_to_texture: the framebuffer has 4 samples but the texture 1 (the samples
                        # live in tile memory only). Reloading it after a flush blitted "sample i" of the 1-sample texture
