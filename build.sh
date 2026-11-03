@@ -2,7 +2,7 @@
 # Copyright The Phorepoc Authors
 # SPDX-License-Identifier: MIT
 
-# build.sh -- Mesa for ARM Symbian, start to end. Runs inside the toolchain's mesa image (ghcr.io/phorepoc/mesa),
+# build.sh -- Mesa for Symbian (ARM, or x32 with PHOREPOC_ARCH=x32), start to end. Runs inside the toolchain's mesa image (ghcr.io/phorepoc/mesa),
 # with the Phorepoc core and pdk checkouts and a build directory where `phe source export` has made the include tree:
 #
 #   PHOREPOC_CORE=../core PHOREPOC_PDK=../pdk PHOREPOC_BUILD=../core/build ./build.sh [-j N]
@@ -10,7 +10,7 @@
 # 1. fetch the Mesa release pinned in mesa.lock into ./mesa (MESA_SRC = use another checkout of that commit);
 # 2. meson host configure + build: only for Mesa's generators (NIR, glapi and format tables, GLSL parsers, lima's
 #    algebraic passes) and compile_commands.json;
-# 3. build_mesa_symbian.py: every needed source file recompiled for ARM Symbian -> $PHOREPOC_BUILD/mesa-build/arm/*.a,
+# 3. build_mesa_symbian.py: every needed source file recompiled for ARM Symbian -> $PHOREPOC_BUILD/mesa-build/<arch>/*.a,
 #    which core's registry links into phgl.dll;
 # 4. gen_gl_fronts.py: the libEGL / libGLESv2 / libGLESv1_CM fronts and phgl.def, into core's os/src/phgl/gen/.
 set -euo pipefail
@@ -43,5 +43,6 @@ fi
 # out of "all"), so all the generated sources and headers the Symbian build compiles against exist
 ninja -C "$HOST" $(ninja -C "$HOST" -t targets all | awk -F: '$1 ~ /\.a$/ {print $1}')
 
-python3 "$HERE/build_mesa_symbian.py" "$@"
-python3 "$HERE/gen_gl_fronts.py"
+python3 "$HERE/build_mesa_symbian.py" "$@"   # PHOREPOC_ARCH=arm (default) or x32
+# the fronts and phgl.def do not depend on the architecture: one build of them is enough
+[ "${PHOREPOC_ARCH:-arm}" != arm ] || python3 "$HERE/gen_gl_fronts.py"

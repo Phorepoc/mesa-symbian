@@ -1,7 +1,7 @@
 # Copyright The Phorepoc Authors
 # SPDX-License-Identifier: MIT
 
-"""build_mesa_symbian -- Mesa (mesa.lock, pinned) compiled for ARM Symbian (GPU plan G2, OURS, 2026-10-09).
+"""build_mesa_symbian -- Mesa (mesa.lock, pinned) compiled for Symbian: ARM (GPU plan G2, OURS, 2026-10-09) and x32.
 
 Runs INSIDE the toolchain mesa image (ghcr.io/phorepoc/mesa), after a meson host configure + build
 of the generators (build.sh does all three steps). For every TU of the static libraries in LIBS it takes the host
@@ -12,11 +12,17 @@ dropped), and recompiles it with the P.I.P.S. client line of an ARM-only DLL:
   with -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=softfp (soft-float ABI = links with the rest of the ROM;
   armv7 for ldrex/strex atomics and VFP),
   plus symbian/mesa_symbian.h force-included (the OS facts Mesa's detect_os.h cannot find).
-C++ TUs (the GLSL compiler) use the arm-none-eabi libstdc++ headers (header-only std::vector) ahead of stdapis.
+C++ TUs (the GLSL compiler) use the target's libstdc++ headers (header-only std::vector) ahead of stdapis.
 
-Output: <build>/mesa-build/arm/<lib>.a (+ objects under <build>/mesa-build/arm/obj/). Logs per TU on failure: <build>/mesa-build/arm/err/.
+The x32 target (--arch x32 or PHOREPOC_ARCH=x32; the PC boards) is the same sources and patches compiled with the x32
+Open C line (pdk tools/openc_cflags.py without --arm: build_mmp_x32's flags, an x86-64 CPU with 32-bit pointers) and
+the host gcc. Its driver set is softpipe (ARCHS below): the same EGL, winsys and window glue as the phone, no GPU
+yet. A hardware driver for a board is a name added to that table (and to build.sh's -Dgallium-drivers), not a fork.
 
-    python3 build_mesa_symbian.py [-j N] [--only <lib>[,<lib>]] [--keep-going]
+Output: <build>/mesa-build/<arch>/<lib>.a (+ objects under <build>/mesa-build/<arch>/obj/). Logs per TU on failure:
+<build>/mesa-build/<arch>/err/.
+
+    python3 build_mesa_symbian.py [--arch arm|x32] [-j N] [--only <lib>[,<lib>]] [--keep-going]
 """
 from __future__ import annotations
 
@@ -30,6 +36,22 @@ from concurrent.futures import ThreadPoolExecutor
 
 FLAGS_VERSION = 2   # bump when base_flags / c_and_cxx / GLOBAL_* / a PATCH of a header change (full rebuild)
 
+
+
+def _arch() -> str:
+    """the target architecture: --arch, else PHOREPOC_ARCH (the pdk's), else arm (read before the constants below)"""
+    a = os.environ.get("PHOREPOC_ARCH") or "arm"
+    for i, x in enumerate(sys.argv):
+        if x == "--arch" and i + 1 < len(sys.argv):
+            a = sys.argv[i + 1]
+        elif x.startswith("--arch="):
+            a = x.split("=", 1)[1]
+    if a not in ("arm", "x32"):
+        raise SystemExit(f"build_mesa_symbian: unknown architecture {a!r} (arm, x32)")
+    return a
+
+
+ARCH = _arch()
 HERE = os.path.dirname(os.path.abspath(__file__))
 # where things are (build.sh sets them; the defaults are the Phorepoc checkouts next to this one)
 MESA = os.path.abspath(os.environ.get("MESA_SRC") or os.path.join(HERE, "mesa"))        # the pinned Mesa (mesa.lock)
@@ -38,14 +60,25 @@ PDK = os.path.abspath(os.environ.get("PHOREPOC_PDK") or os.path.join(HERE, "..",
 BUILD = os.path.abspath(os.environ.get("PHOREPOC_BUILD") or os.path.join(CORE, "build"))
 WORK = os.path.join(BUILD, "mesa-build")       # core's registry links phgl with mesa-build/arm/*.a
 HOST = os.path.join(WORK, "host")
-OUT = os.path.join(WORK, "arm")
+OUT = os.path.join(WORK, ARCH)
 SHIM = os.path.join(HERE, "symbian")
 SEAM = os.path.join(CORE, "os", "src", "symgl")   # symgpu.h + symgl_native.h: core's side of the seam
 
-# the static libraries phgl.dll is made of: softpipe (G2) and lima, the Mali-400 driver (G4) + the panfrost tiling
-# helpers it shares
+# the gallium drivers, with the static libraries each is made of and the -D that tells egl_symbian.c it is built in.
+# softpipe (G2) is the software renderer every board has; lima (G4, the Mali-400, with the panfrost tiling helpers it
+# shares) needs the kernel's GPU channel (drm_symbian.c), which only the phone's SoC provides. egl_symbian.c picks at
+# run time (sym_create_screen: the hardware driver when its kernel driver answers, else softpipe), so a board's
+# hardware driver is one more row here and one more name for its architecture in ARCHS -- not a fork.
+DRIVERS = {
+    "softpipe": dict(libs=["libsoftpipe", "libws_null"], defs=["-DGALLIUM_SOFTPIPE"]),
+    "lima": dict(libs=["liblima", "libpanfrost_shared"], defs=["-DGALLIUM_LIMA"]),
+}
+ARCHS = {"arm": ["softpipe", "lima"], "x32": ["softpipe"]}
+DRV = ARCHS[ARCH]
+
+# the static libraries phgl.dll is made of
 LIBS = ["libegl_symbian", "libgles2_entry", "libgles1_entry", "libmesa_util_c11", "libmesa_util", "libblake3", "libcompiler", "libnir", "libglcpp", "libglsl", "libglsl_util",
-        "libglapi", "libmesa", "libgallium", "libgalliumvl_stub", "libsoftpipe", "libws_null", "liblima", "libpanfrost_shared"]
+        "libglapi", "libmesa", "libgallium", "libgalliumvl_stub"] + [l for d in DRV for l in DRIVERS[d]["libs"]]
 
 # TUs left out (Linux/x86-only, or features a GLES-only software stack never reaches)
 DROP = {
@@ -258,6 +291,16 @@ PATCH = {
     },
 }
 
+if ARCH == "x32":
+    # x86 only: gallium's vertex translator JIT-compiles x86 code at run time (translate_sse.c over rtasm's executable
+    # memory, rtasm_execmem.c: dropped above). A Symbian process has no memory it can both write and run, so the
+    # generic C translator (translate_generic.c, what the ARM build uses) serves.
+    DROP["libgallium"] = DROP["libgallium"] | {"translate_sse.c", "rtasm_x86sse.c"}
+    PATCH["libgallium"] = {
+        "translate.c": [("#if DETECT_ARCH_X86 || DETECT_ARCH_X86_64\n   translate = translate_sse2_create( key );",
+                         "#if 0   /* OURS (Symbian): no run-time code generation */\n"
+                         "   translate = translate_sse2_create( key );")]}
+
 # libraries whose PATCH touches a header: compiled from a mirror of this source directory (make_mirror)
 MIRROR = {"libsoftpipe": "src/gallium/drivers/softpipe"}
 
@@ -273,12 +316,12 @@ _EGL_MAIN = ["eglapi.c", "eglarray.c", "eglconfigdebug.c", "eglconfig.c", "eglco
 PSEUDO = {
     # Mesa's EGL core + OUR Symbian driver/frontend/winsys (symbian/src; egl_symbian.c says why HAIKU)
     "libegl_symbian": dict(
-        borrow=["libsoftpipe", "libmesa", "liblima"],
+        borrow=["libsoftpipe", "libmesa"] + (["liblima"] if "lima" in DRV else []),
         incs=[os.path.join(MESA, "src/egl"), os.path.join(MESA, "src/egl/main"),
               os.path.join(MESA, "src/gallium/drivers"), os.path.join(MESA, "src/gallium/winsys"),
               os.path.join(SHIM, "src")],
-        defs=["-D_EGL_NATIVE_PLATFORM=_EGL_PLATFORM_HAIKU", "-D_EGL_BUILT_IN_DRIVER_HAIKU", "-DGALLIUM_SOFTPIPE",
-              "-DGALLIUM_LIMA"],
+        defs=["-D_EGL_NATIVE_PLATFORM=_EGL_PLATFORM_HAIKU", "-D_EGL_BUILT_IN_DRIVER_HAIKU"]
+             + [x for d in DRV for x in DRIVERS[d]["defs"]],
         srcs=[os.path.join(MESA, "src/egl/main", f) for f in _EGL_MAIN]
              + [os.path.join(MESA, "src/util/streaming-load-memcpy.c")]   # was a link stub (not in libmesa_util's list): readpixels from WC memory (st_pbo_compute); a plain memcpy on ARM32
              + [os.path.join(SHIM, "src", f) for f in ("egl_symbian.c", "sym_frontend.c", "sym_winsys.c",
@@ -350,11 +393,20 @@ GLOBAL_DROP = {
     "HAVE_RENDERDOC_INTEGRATION", "USE_DRICONF", "SYSCONFDIR", "DATADIR",
 }
 
+# the compiler of each architecture: arm = the bare-metal cross compiler, x32 = the host's gcc with -mx32 (the image
+# toolchain's own: build_mmp_x32 compiles with it too)
+if ARCH == "arm":
+    CC, CXX_, AR, TARGET_FLAGS = "arm-none-eabi-gcc", "arm-none-eabi-g++", "arm-none-eabi-ar", [
+        "-march=armv7-a", "-mthumb", "-mfloat-abi=softfp", "-mfpu=vfpv3-d16"]
+else:
+    CC, CXX_, AR, TARGET_FLAGS = "gcc", "g++", "ar", ["-mx32"]
+
+
 def _cxx_incs() -> list[str]:
-    """the arm-none-eabi libstdc++ header dirs for the armv7-a softfp multilib, as the compiler itself reports them
-    (Ubuntu's packaged toolchain and ARM's own put them in different places, under different GCC versions)"""
-    r = subprocess.run(["arm-none-eabi-g++", "-march=armv7-a", "-mthumb", "-mfloat-abi=softfp", "-mfpu=vfpv3-d16",
-                        "-x", "c++", "-E", "-v", "-"], input="", capture_output=True, text=True)
+    """the libstdc++ header dirs of the target (arm: the armv7-a softfp multilib; x32: the -mx32 one), as the compiler
+    itself reports them (Ubuntu's packaged toolchain and ARM's own put them in different places, under different GCC
+    versions)"""
+    r = subprocess.run([CXX_, *TARGET_FLAGS, "-x", "c++", "-E", "-v", "-"], input="", capture_output=True, text=True)
     lines = r.stderr.splitlines()
     try:
         a = lines.index("#include <...> search starts here:") + 1
@@ -367,7 +419,67 @@ def _cxx_incs() -> list[str]:
 CXX_INC = _cxx_incs()
 
 
+def base_flags_x32() -> list[str]:
+    """The x32 line: the pdk's "pure Open C" one (tools/toolchain/mk_pure_wrappers.sh, which the other ported C libraries
+    -- OpenSSL, FFmpeg -- build with): openc_cflags.py --exe minus the Symbian kernel/euser include dirs and force-
+    includes, Open C's stdapis after everything else, the stub e32def.h and POSIX gap headers of openc_posix/, and the
+    compiler's own va_list (ph_x32_prefix.h: libc.dll reads the System V one). Also dropped: -masm=intel (Mesa's inline
+    asm is AT&T syntax) and -ffreestanding / -fno-builtin (Mesa wants the compiler's memcpy and friends inlined)."""
+    ovr = os.path.join(PDK, "tools", "toolchain", "openc_posix")
+    drop = {"-x", "c", "-march=armv5te", "-marm", "-mthumb-interwork", "-mfloat-abi=soft", "-DSYMCC_C_DRIVER", "-std=gnu11",
+            "-fno-exceptions", "-fno-rtti", "-w", "-ffreestanding", "-fno-builtin", "-masm=intel", "-D__SOFTFP="}
+    out = subprocess.run([sys.executable, os.path.join(PDK, "tools", "openc_cflags.py"), "--exe"],
+                         check=True, capture_output=True, text=True).stdout.split("\n")
+    out = [f for f in out if f and f not in drop]
+    flags, late, i = ["-x", "c", "-std=gnu11"], [], 0
+    while i < len(out):
+        f = out[i]
+        i += 1
+        if f == "-include":
+            # port_prelude.h, e32def.h: kernel-side force-includes, dropped; the variant .hrh (SYMBIAN_OE_POSIX_SIGNALS
+            # ... the feature switches Open C's headers test) stays
+            if out[i].endswith(".hrh"):
+                flags += ["-include", out[i]]
+            i += 1
+            continue
+        if f in ("-I", "-idirafter") and i < len(out):
+            kind, p = f, out[i]
+            i += 1
+        elif f.startswith("-I"):
+            kind, p = "-I", f[2:]
+        else:
+            flags.append(f)
+            continue
+        q = p.replace("\\", "/")
+        if "/toolchain/" in q or "/kernel/eka/" in q or "/halservices/" in q:
+            continue
+        if q.endswith(("/stdapis", "/epoc32/include")) or "/stdapis/" in q:
+            flags += ["-idirafter", p]
+        elif q.endswith("/casefix"):
+            late += ["-idirafter", p]    # the case-folded mirror of the tree: only as the very last fallback
+        else:
+            flags += [f"-I{p}"] if kind == "-I" else ["-idirafter", p]
+    # the host gcc predefines the host's OS (__linux__ ...): Mesa's detect_os.h would take the Linux paths (epoll, auxv,
+    # sched_getcpu ...); the bare-metal ARM compiler defines none of it, and mesa_symbian.h says what this OS is
+    flags += ["-U__linux__", "-U__linux", "-Ulinux", "-U__gnu_linux__", "-U__unix__", "-U__unix", "-Uunix"]
+    flags += ["-D__SOFTFP=", f"-I{os.path.join(ovr, 'pure')}", f"-I{ovr}", f"-I{os.path.join(SHIM, 'include-x32')}"]
+    return flags + late + ["-fno-math-errno", "-fno-trapping-math", "-fno-common",
+                    # the host gcc turns sinf(x) + cosf(x) into one call of sincosf, which only a glibc has (the bare-metal ARM one does not)
+                    "-fno-builtin-sin", "-fno-builtin-sinf", "-fno-builtin-cos", "-fno-builtin-cosf",
+                    "-Wno-unknown-pragmas", "-Wno-attributes", "-Werror=implicit-function-declaration",
+                    "-Werror=incompatible-pointer-types", "-Werror=int-conversion", "-Werror=return-type",
+                    # BLAKE3: x32 defines __x86_64__, so its dispatcher would call the SIMD kernels (assembly files
+                    # DROP leaves out); the portable ones serve
+                    "-DBLAKE3_NO_SSE2", "-DBLAKE3_NO_SSE41", "-DBLAKE3_NO_AVX2", "-DBLAKE3_NO_AVX512",
+                    "-include", os.path.join(PDK, "tools", "toolchain", "openc_posix", "pure", "ph_x32_prefix.h"),
+                    "-include", os.path.join(SHIM, "mesa_symbian.h"),
+                    "-idirafter", subprocess.run([CC, "-mx32", "-print-file-name=include"], check=True,
+                                                 capture_output=True, text=True).stdout.strip()]
+
+
 def base_flags() -> list[str]:
+    if ARCH == "x32":
+        return base_flags_x32()
     out = subprocess.run([sys.executable, os.path.join(PDK, "tools", "openc_cflags.py"), "--arm",
                           "--std=gnu11"], check=True, capture_output=True, text=True).stdout.split("\n")
     flags = []
@@ -383,7 +495,7 @@ def base_flags() -> list[str]:
                     "-Werror=incompatible-pointer-types", "-Werror=int-conversion", "-Werror=return-type",
                     "-include", os.path.join(SHIM, "mesa_symbian.h"),
                     # GCC's own freestanding headers (stdalign.h, stdatomic.h ...) where stdapis has none
-                    "-idirafter", subprocess.run(["arm-none-eabi-gcc", "-print-file-name=include"], check=True,
+                    "-idirafter", subprocess.run([CC, "-print-file-name=include"], check=True,
                                                  capture_output=True, text=True).stdout.strip()]
 
 
@@ -406,10 +518,13 @@ def c_and_cxx(flags: list[str]) -> tuple[list[str], list[str]]:
     # -flifetime-dse=1 (as Mesa's meson.build): the GLSL IR's operator new stores node_linalloc into the object
     # before its constructor runs; GCC's default (2) deletes those stores as dead -> NULL linear context, crash
     # in linear_zalloc_child on the first shader (seen on the phone 2026-10-09)
-    cxx = ["-x", "c++", "-std=gnu++17", "-fno-exceptions", "-fno-rtti", "-fno-threadsafe-statics",
-           "-flifetime-dse=1"] + \
-          [x for i in CXX_INC for x in ("-isystem", i)] + cxx
-    return c, cxx
+    head = ["-x", "c++", "-std=gnu++17", "-fno-exceptions", "-fno-rtti", "-fno-threadsafe-statics", "-flifetime-dse=1"]
+    if ARCH == "arm":
+        return c, head + [x for i in CXX_INC for x in ("-isystem", i)] + cxx
+    # x32: the build host's libstdc++ (the header-only parts: std::vector ...) LAST (-idirafter): its dirs carry C++
+    # wrappers for math.h / stdlib.h (`using ::tgammal` ...) naming functions Open C's libm lacks; Open C's own C headers
+    # must answer those
+    return c, head + cxx + [x for i in CXX_INC for x in ("-idirafter", i)]
 
 
 def tu_flags(entry: dict) -> tuple[list[str], str]:
@@ -561,7 +676,7 @@ def main() -> int:
             return lib, obj, None
         # Mesa's include dirs (and our overrides) BEFORE the Symbian system includes: epoc32/include carries the
         # 2010 KHR/EGL/GLES headers, older than the ones Mesa is written against
-        cmd = (["arm-none-eabi-gcc", f"-I{os.path.join(SHIM, 'include')}", f"-I{SEAM}"] + extra + (cxxflags if cxx else cflags)
+        cmd = ([CC, f"-I{os.path.join(SHIM, 'include')}", f"-I{SEAM}"] + extra + (cxxflags if cxx else cflags)
                + ["-c", src, "-o", obj])
         r = subprocess.run(cmd, capture_output=True, text=True)
         err = os.path.join(OUT, "err", lib + "__" + os.path.basename(src) + ".txt")
@@ -586,9 +701,9 @@ def main() -> int:
         if os.path.exists(ar):
             os.remove(ar)
         if ok[lib] and (not bad or a.keep_going):
-            subprocess.run(["arm-none-eabi-ar", "rcs", ar] + ok[lib], check=True)
+            subprocess.run([AR, "rcs", ar] + ok[lib], check=True)
         print(f"  {lib}: {len(ok[lib])} ok, {sum(1 for l, _ in bad if l == lib)} failed")
-    print(f"{len(bad)} failed (logs: <build>/mesa-build/arm/err/)")
+    print(f"{len(bad)} failed (logs: <build>/mesa-build/{ARCH}/err/)")
     return 1 if bad else 0
 
 
