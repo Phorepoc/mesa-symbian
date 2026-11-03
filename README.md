@@ -1,16 +1,16 @@
 # mesa-symbian
 
-This is [Mesa](https://mesa3d.org) on Symbian. It gives [Phorepoc](https://github.com/Phorepoc) OpenGL ES 1.1 and 2.0
+This is [Mesa](https://mesa3d.org) on Phorepoc OS. It gives [Phorepoc OS](https://github.com/Phorepoc) OpenGL ES 1.1 and 2.0
 with EGL, so 3D games and apps run. On boards with a Mali-400 GPU it draws with it through Mesa's lima driver, and on
 any other board it falls back to softpipe, Mesa's software renderer.
 
 We don't keep a copy of Mesa here. The build downloads the release named in `mesa.lock` (26.2.4 at the moment) and
-compiles it for Symbian. This repository holds the parts Symbian needs on top:
+compiles it for Phorepoc OS. This repository holds the parts Phorepoc OS needs on top:
 
-- `symbian/src/` has the EGL driver, the glue between Mesa and Symbian's windows, and a small emulation of the Linux
+- `symbian/src/` has the EGL driver, the glue between Mesa and the system's windows, and a small emulation of the Linux
   GPU interface that lima expects to talk to.
 - `symbian/include/` has the POSIX headers Mesa assumes are there, like `pthread.h` and `xf86drm.h`.
-- `build_mesa_symbian.py` compiles each Mesa source file Symbian needs, and `gen_gl_fronts.py` generates the
+- `build_mesa_symbian.py` compiles each Mesa source file Phorepoc OS needs, and `gen_gl_fronts.py` generates the
   `libEGL`, `libGLESv2` and `libGLESv1_CM` libraries apps link against.
 
 The rest of the GL stack lives in [core](https://github.com/Phorepoc/core). That's `phgl.dll`, which these libraries are
