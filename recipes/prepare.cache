@@ -1,0 +1,9 @@
+# What recipes/prepare.sh makes that a later run can reuse (the pdk's tools/ci/prepare_cache.sh): Mesa's source at the
+# pinned commit, its host build (the generators, meson and ninja's state) and the objects compiled for the target. The key
+# is the toolchain image and the two files that decide the host build; the objects are checked by content when used
+# (build_mesa_symbian.py, the pdk's objcache.py), so a changed header or flag rebuilds exactly what it touches.
+image ghcr.io/phorepoc/mesa:latest
+key   build.sh
+key   mesa.lock
+path  mesa
+path  $BUILD/mesa-build

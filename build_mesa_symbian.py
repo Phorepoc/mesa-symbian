@@ -34,7 +34,16 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
+# the pdk's rule for "is this object up to date" (by content: compiler, command, the bytes of every file read); a pdk
+# from before it reuses an object by modification time, as this script always did
+sys.path.insert(0, os.path.join(os.path.abspath(os.environ.get("PHOREPOC_PDK") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pdk")), "tools", "emitter"))
+try:
+    import objcache as OC
+except ImportError:
+    OC = None
+
 FLAGS_VERSION = 3   # bump when base_flags / c_and_cxx / GLOBAL_* / a PATCH of a header change (full rebuild)
+
 
 
 
@@ -715,7 +724,7 @@ def main() -> int:
     def run(job):
         lib, src, obj, extra = job
         os.makedirs(os.path.dirname(obj), exist_ok=True)
-        if os.path.isfile(obj) and os.path.getmtime(obj) > max(os.path.getmtime(src), stamp):
+        if not OC and os.path.isfile(obj) and os.path.getmtime(obj) > max(os.path.getmtime(src), stamp):
             return lib, obj, True
         cxx = src.endswith((".cpp", ".cc"))
         if src.endswith(".S"):
@@ -723,7 +732,15 @@ def main() -> int:
         # Mesa's include dirs (and our overrides) BEFORE the Symbian system includes: epoc32/include carries the
         # 2010 KHR/EGL/GLES headers, older than the ones Mesa is written against
         cmd = ([CC, f"-I{os.path.join(SHIM, 'include')}", f"-I{SEAM}"] + extra + (cxxflags if cxx else cflags)
-               + ["-c", src, "-o", obj])
+               + ["-c", src])
+        if OC:
+            key = OC.make_key(CC, cmd, str(FLAGS_VERSION))
+            why = OC.check(obj, key)
+            OC.count(why)
+            if not why:
+                return lib, obj, True
+            cmd += ["-MMD", "-MF", obj + ".d"]
+        cmd += ["-o", obj]
         r = subprocess.run(cmd, capture_output=True, text=True)
         err = os.path.join(OUT, "err", lib + "__" + os.path.basename(src) + ".txt")
         if r.returncode != 0:
@@ -732,6 +749,8 @@ def main() -> int:
             return lib, obj, False
         if os.path.exists(err):
             os.remove(err)
+        if OC:
+            OC.record(obj, key)
         return lib, obj, True
 
     ok = {lib: [] for lib in libs}
