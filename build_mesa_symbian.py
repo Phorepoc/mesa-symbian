@@ -89,7 +89,7 @@ ARCHS = {"arm": ["softpipe", "lima"], "x32": ["softpipe", "svga"]}
 DRV = ARCHS[ARCH]
 
 # the static libraries phgl.dll is made of
-LIBS = ["libegl_symbian", "libgles2_entry", "libgles1_entry", "libmesa_util_c11", "libmesa_util", "libblake3", "libcompiler", "libnir", "libglcpp", "libglsl", "libglsl_util",
+LIBS = ["libegl_symbian", "libgles2_entry", "libgles1_entry", "libmesa_util_c11", "libmesa_util", "libblake3", "libcompiler", "libvtn", "libnir", "libglcpp", "libglsl", "libglsl_util",
         "libglapi", "libmesa", "libgallium", "libgalliumvl_stub"] + [l for d in DRV for l in DRIVERS[d]["libs"]]
 
 # TUs left out (Linux/x86-only, or features a GLES-only software stack never reaches)
@@ -97,7 +97,6 @@ DROP = {
     "libmesa_util": {"u_debug_stack_android.cpp", "os_socket.c", "u_debug_memory.c",
                      "disk_cache.c", "disk_cache_os.c", "mesa_cache_db.c", "mesa_cache_db_multipart.c",
                      "fossilize_db.c", "perf/u_trace.c", "perf/u_perfetto.cc",
-                     "texcompress_astc.cpp", "texcompress_astc_luts.cpp", "texcompress_astc_luts_wrap.cpp",
                      "anon_file.c", "os_file_notify.c", "u_dl.c", "u_sync_provider.c"},
     "libgallium": {"rtasm_execmem.c"},
     "libsvgadrm": {"vmw_msg.c", "vmw_screen.c"},   # replaced below (EXTRA): the VMware backdoor port I/O, the fstat / dup of the DRM fd
@@ -114,6 +113,28 @@ REPLACE = {
 # in place of the original (with the original's directory still first for "sibling.h" includes)
 PATCH = {
     "libmesa_util": {
+        # ASTC (the CPU decoder st_cb_texture.c calls): the C++ <cstdlib> needs a hosted libc; the LUT holder's
+        # std::unordered_map needs libstdc++'s rehash policy (not in a Symbian process) and std::mutex a hosted
+        # <mutex> -- a table per ASTC block size (4..12 wide and tall, key = width * 16 + height) and Mesa's own mutex
+        "texcompress_astc.cpp": [("#include <cstdlib>  // for abort() on windows\n",
+                                  "#include <stdlib.h>   /* OURS (Symbian): <cstdlib> needs a hosted libc */\n")],
+        "texcompress_astc_luts.h": [
+            ("#include <mutex>\n#include <unordered_map>\n#include <vector>\n",
+             "#include <vector>\n#include \"util/simple_mtx.h\"\n"),
+            ("        std::mutex table_lock;\n        std::unordered_map<unsigned, PartitionTable> tables;\n",
+             "        /* OURS (Symbian): one table per block size, built on first use */\n"
+             "        simple_mtx_t table_lock = SIMPLE_MTX_INITIALIZER;\n"
+             "        PartitionTable tables[12 * 16 + 13];\n"
+             "        bool tables_built[12 * 16 + 13] = {};\n")],
+        "texcompress_astc_luts.cpp": [
+            ("#include <mutex>\n#include <unordered_map>\n#include <vector>\n", "#include <vector>\n"),
+            ("\tstd::lock_guard<std::mutex> holder{table_lock};\n\tauto itr = tables.find(width * 16 + height);\n"
+             "\tif (itr != tables.end())\n\t{\n\t\treturn itr->second;\n\t}\n\telse\n\t{\n"
+             "\t\tauto &t = tables[width * 16 + height];\n\t\tt = { width, height };\n\t\treturn t;\n\t}\n",
+             "\tassert(width <= 12 && height <= 12);\n\tconst unsigned key = width * 16 + height;\n"
+             "\tsimple_mtx_lock(&table_lock);\n\tif (!tables_built[key])\n\t{\n"
+             "\t\ttables[key] = { width, height };\n\t\ttables_built[key] = true;\n\t}\n"
+             "\tsimple_mtx_unlock(&table_lock);\n\treturn tables[key];\n")],
         # the OS sysinfo header blocks (two) end in #error for an unknown OS; Symbian needs none of them
         "os_misc.c": [("#else\n#error unexpected platform in os_sysinfo.c\n", "#else\n/* Symbian (OURS): none */\n")],
         # thread-locals -> the calling thread's slot (mesa_symbian.h, symgl_thread_slot): qsort_r's comparator and
@@ -347,7 +368,8 @@ if ARCH == "x32":
                          "   translate = translate_sse2_create( key );")]}
 
 # libraries whose PATCH touches a header: compiled from a mirror of this source directory (make_mirror)
-MIRROR = {"libsoftpipe": "src/gallium/drivers/softpipe"}
+MIRROR = {"libsoftpipe": "src/gallium/drivers/softpipe",
+          "libmesa_util": "src/util"}   # (the ASTC LUT header is patched)
 
 # OURS sources added to a library (compiled with that library's include dirs + macros)
 EXTRA = {

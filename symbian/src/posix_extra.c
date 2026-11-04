@@ -61,3 +61,10 @@ int mkstemps(char *tmpl, int suffixlen)
    errno = EEXIST;
    return -1;
 }
+
+/* sync(2) -- gallium's ddebug wrapper (dd_draw.c) calls it before it dumps a hang report. This process owns no
+ * delayed-write buffers (its files are the DRM shim's descriptors and stdio streams the caller fclose()s), so
+ * there is nothing to flush; the call is complete as it stands. */
+void sync(void)
+{
+}

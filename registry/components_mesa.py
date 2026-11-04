@@ -6,7 +6,7 @@ driver) or x32 (softpipe + the svga driver of a VM with 3D). Without this layer 
 COMPONENTS = {}
 
 _COMMON = ("libegl_symbian", "libgles2_entry", "libgles1_entry", "libmesa", "libglapi", "libsoftpipe")
-_REST = ("libgallium", "libgalliumvl_stub", "libglsl", "libglcpp", "libglsl_util", "libnir", "libcompiler",
+_REST = ("libgallium", "libgalliumvl_stub", "libglsl", "libglcpp", "libglsl_util", "libnir", "libcompiler", "libvtn",
          "libmesa_util", "libmesa_util_c11", "libblake3", "libws_null")
 
 EXTEND = {
