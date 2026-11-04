@@ -152,6 +152,9 @@ sym_st_framebuffer_validate_textures(struct pipe_frontend_drawable *drawable, un
          }
          format = buffer->visual.color_format;
          bind = PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_RENDER_TARGET;
+         if (sym_scanout_capable && buffer->native_window)
+            bind |= PIPE_BIND_SCANOUT;   /* (the svga renderer: a screen target can show this surface, see sym_try_scanout) */
+         break;
          break;
       case ST_ATTACHMENT_DEPTH_STENCIL:
          format = buffer->visual.depth_stencil_format;
@@ -237,6 +240,10 @@ sym_destroy_st_framebuffer(struct sym_buffer *buffer)
    FREE(buffer);
 }
 
+struct sym_prof sym_prof;
+int sym_scanout_capable;
+unsigned sym_vmw_prof_cbs, sym_vmw_prof_us, sym_vmw_prof_bytes, sym_vmw_prof_ioctls, sym_vmw_prof_ioctl_us, sym_vmw_prof_objs, sym_vmw_prof_obj_us;
+
 /* the copy fallback: read the back buffer through a transfer and blit it into the window */
 static void
 sym_present_copy(struct sym_buffer *buffer, struct pipe_context *pipe)
@@ -245,11 +252,17 @@ sym_present_copy(struct sym_buffer *buffer, struct pipe_context *pipe)
    if (!back)
       return;
    struct pipe_transfer *transfer = NULL;
+   unsigned t0 = symgl_now_us();
    void *map = pipe_texture_map(pipe, back, 0, 0, PIPE_MAP_READ, 0, 0, buffer->width, buffer->height, &transfer);
+   unsigned t1 = symgl_now_us();
    if (!map)
       return;
    symgl_window_present_pixels(buffer->native_window, map, transfer->stride, buffer->width, buffer->height);
+   unsigned t2 = symgl_now_us();
    pipe_texture_unmap(pipe, transfer);
+   sym_prof.map += SYM_DUS(t0, t1);
+   sym_prof.blit += SYM_DUS(t1, t2);
+   sym_prof.unmap += SYM_DUS(t2, symgl_now_us());
 }
 
 void

@@ -46,11 +46,24 @@ struct sym_buffer {
    /* G6b: an RSgImage pixmap surface (native_window == NULL): the image's resource is the (front) colour buffer;
     * prime_fd is its import (unimported with the buffer) */
    struct pipe_resource *pixmap_res;
+   /* S6: scan-out takeover of a full-screen window on the svga renderer (egl_symbian.c sym_try_scanout) */
+   unsigned scanout_off_until;           /* symgl_now_us(): no new attempt before it */
+   int fullscreen, fs_check, scanout_on;
+   unsigned scanout_since, scanout_backoff;   /* symgl_now_us() of the takeover; the wait after a hand-back (us) */
 };
+
+/* 1 when the svga renderer is up: window colour buffers get the scan-out bind (a surface a screen target can show) */
+extern int sym_scanout_capable;
 
 struct sym_display {
    struct pipe_frontend_screen *fscreen;
 };
+
+/* S5: where the time of a frame goes (microseconds, summed; egl_symbian.c prints them every 120 swaps) */
+struct sym_prof { unsigned map, blit, unmap; };
+extern struct sym_prof sym_prof;
+/* an elapsed time from two symgl_now_us() readings; the CPUs' counters are not in step, so a negative difference counts as 0 */
+#define SYM_DUS(a, b) ((int)((b) - (a)) < 0 ? 0u : (unsigned)((b) - (a)))
 
 struct sym_display *sym_create_display(struct pipe_screen *screen);
 void sym_destroy_display(struct sym_display *display);

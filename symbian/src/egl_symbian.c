@@ -48,6 +48,11 @@ struct pipe_screen *lima_screen_create(int fd, const struct pipe_screen_config *
 #ifdef GALLIUM_SVGA
 #include "svga/svga_public.h"
 #include "svga/drm/svga_drm_public.h"
+#include "svga/svga_resource_texture.h"
+extern uint32_t sym_vmw_surface_id(struct svga_winsys_surface *s);
+extern void sym_vmw_display_size(unsigned *w, unsigned *h);
+extern int sym_vmw_scanout_present(uint32_t sid, unsigned w, unsigned h);
+extern void sym_vmw_scanout_end(void);
 #endif
 
 _EGL_DRIVER_STANDARD_TYPECASTS(sym_egl)
@@ -73,6 +78,10 @@ struct sym_egl_surface {
    _EGLSurface base;
    struct sym_buffer *fb;
    int range;                   /* G6b: cache-sync registry slot of a pixmap surface, -1 = none */
+   /* svga: an RSgImage pixmap surface is a render target of the GPU kept in step with the image's memory (sym_pixmap_*) */
+   void *sg_base;
+   unsigned sg_stride, sg_width, sg_height, sg_bpp;
+   int gpu_pixmap, upload_pending;
 };
 
 static void sym_range_remove(int idx);
@@ -163,6 +172,42 @@ sym_create_pbuffer_surface(_EGLDisplay *disp, _EGLConfig *conf, const EGLint *at
    return &surf->base;
 }
 
+/* ---- RSgImage pixmap surfaces on the svga renderer ----------------------------------------------------------------------------
+ * The svga driver draws in GPU memory it owns and has no display target over foreign memory, so a pixmap surface is a render target
+ * of its own and EGL's native-rendering rules keep it in step with the image: what the CPU wrote reaches the GPU at eglWaitNative
+ * (and when the surface is first made current), what the GPU drew reaches the image at eglWaitClient, eglSwapBuffers (a no-op for a
+ * pixmap otherwise) and when the context lets go of the surface. */
+static void
+sym_pixmap_upload(struct sym_egl_surface *surf, struct pipe_context *pipe)
+{
+   struct pipe_resource *res = surf->fb->pixmap_res;
+   if (!res || !surf->gpu_pixmap)
+      return;
+   struct pipe_box box;
+   u_box_2d(0, 0, surf->sg_width, surf->sg_height, &box);
+   pipe->texture_subdata(pipe, res, 0, PIPE_MAP_WRITE, &box, surf->sg_base, surf->sg_stride, 0);
+   surf->upload_pending = 0;
+}
+
+static void
+sym_pixmap_download(struct sym_egl_surface *surf, struct st_context *st)
+{
+   struct pipe_resource *res = surf->fb->pixmap_res;
+   if (!res || !surf->gpu_pixmap || !st)
+      return;
+   struct pipe_context *pipe = st->pipe;
+   _mesa_glthread_finish(st->ctx);
+   st_context_flush(st, ST_FLUSH_FRONT, NULL, NULL, NULL);
+   struct pipe_transfer *t = NULL;
+   const uint8_t *map = pipe_texture_map(pipe, res, 0, 0, PIPE_MAP_READ, 0, 0, surf->sg_width, surf->sg_height, &t);
+   if (!map)
+      return;
+   const unsigned row = surf->sg_width * surf->sg_bpp;
+   for (unsigned y = 0; y < surf->sg_height; y++)
+      memcpy((uint8_t *)surf->sg_base + (size_t)y * surf->sg_stride, map + (size_t)y * t->stride, row);
+   pipe_texture_unmap(pipe, t);
+}
+
 static EGLBoolean
 sym_destroy_surface(_EGLDisplay *disp, _EGLSurface *s)
 {
@@ -170,6 +215,10 @@ sym_destroy_surface(_EGLDisplay *disp, _EGLSurface *s)
    if (_eglPutSurface(s)) {
       struct sym_egl_surface *surf = sym_egl_surface(s);
       sym_range_remove(surf->range);
+#ifdef GALLIUM_SVGA
+      if (surf->fb->scanout_on)
+         sym_vmw_scanout_end();   /* (the render target is going away: the framebuffer is the display again) */
+#endif
       sym_destroy_st_framebuffer(surf->fb);
       free(surf);
    }
@@ -199,6 +248,103 @@ sym_query_surface(_EGLDisplay *disp, _EGLSurface *s, EGLint attribute, EGLint *v
    return _eglQuerySurface(disp, s, attribute, value);
 }
 
+extern unsigned sym_vmw_prof_cbs, sym_vmw_prof_us, sym_vmw_prof_bytes, sym_vmw_prof_ioctls, sym_vmw_prof_ioctl_us, sym_vmw_prof_objs, sym_vmw_prof_obj_us;
+
+#ifdef GALLIUM_SVGA
+/* S6: a full-screen GL window on the svga renderer bypasses the window server: its render target is the VM's screen target and a swap is one
+ * UPDATE_GB_SCREENTARGET (drm_symbian_vmw.c). The kernel's display driver takes the screen target down again as soon as the window server
+ * draws anything (a note, a pointer, another window on top, the window leaving full-screen); the frame after that goes through the window
+ * server, and a new attempt waits 1.5 s. true = this frame is on screen. */
+static bool
+sym_try_scanout(struct sym_egl_display *dpy, struct sym_buffer *buffer)
+{
+   if (dpy->vmw_fd < 0 || buffer->surf_ok || !buffer->native_window)
+      return false;
+   struct pipe_resource *back = buffer->textures[ST_ATTACHMENT_BACK_LEFT];
+   if (!back || !(back->bind & PIPE_BIND_SCANOUT))
+      return false;
+   const unsigned now = symgl_now_us();
+   if (buffer->scanout_off_until && (int)(now - buffer->scanout_off_until) < 0)
+      return false;
+   unsigned dw, dh;
+   sym_vmw_display_size(&dw, &dh);
+   if (!dw || !dh)
+      return false;
+   if (!buffer->scanout_on || buffer->fs_check-- <= 0) {   /* (window server round trips: before every new attempt, then now and then; the display driver notices anything that matters at once) */
+      buffer->fullscreen = symgl_window_fullscreen(buffer->native_window, dw, dh);
+      buffer->fs_check = 120;
+   }
+   if (!buffer->fullscreen) {
+      if (buffer->scanout_on) {
+         sym_vmw_scanout_end();
+         buffer->scanout_on = 0;
+      }
+      return false;
+   }
+   const int r = sym_vmw_scanout_present(sym_vmw_surface_id(svga_texture(back)->handle), buffer->width, buffer->height);
+   if (r != 0) {
+      if (buffer->scanout_on)
+         symgl_log("[symgl] scan-out: handed back to the window server");
+      buffer->scanout_on = 0;
+      /* a screen target that did not last 10 s doubles the wait before the next attempt (1.5 s, 3 s ... 24 s): a window server that keeps
+         drawing (an animation over the game, a resize) must not make the display flip between the two paths */
+      if (buffer->scanout_since && (int)(now - buffer->scanout_since) < 10000000)
+         buffer->scanout_backoff = buffer->scanout_backoff < 24000000u ? buffer->scanout_backoff * 2 : buffer->scanout_backoff;
+      else
+         buffer->scanout_backoff = 1500000u;
+      buffer->scanout_since = 0;
+      buffer->scanout_off_until = now + buffer->scanout_backoff;
+      buffer->fs_check = 0;
+      return false;
+   }
+   if (!buffer->scanout_on) {
+      symgl_log("[symgl] scan-out: this window is the display (GPU screen target, no window server)");
+      buffer->scanout_since = now ? now : 1;
+      if (!buffer->scanout_backoff)
+         buffer->scanout_backoff = 1500000u;
+   }
+   buffer->scanout_on = 1;
+   return true;
+}
+#else
+static bool
+sym_try_scanout(struct sym_egl_display *dpy, struct sym_buffer *buffer)
+{
+   (void)dpy; (void)buffer;
+   return false;
+}
+#endif
+
+/* S5: the frame profile, one log line per 120 swaps: where the microseconds go (summed over the 120 frames, then per frame) */
+static void
+sym_prof_frame(unsigned pe, unsigned p0, unsigned p1, unsigned p2, unsigned p3, unsigned px)
+{
+   static unsigned n, flush, fence, present, first, cbs, cbus, cbbytes, pre, post, inswap;
+   static unsigned last_log;
+   if (!n) first = pe;
+   pre += SYM_DUS(pe, p0);
+   post += SYM_DUS(p3, px);
+   inswap += SYM_DUS(pe, px);
+   flush += SYM_DUS(p0, p1);
+   fence += SYM_DUS(p1, p2);
+   present += SYM_DUS(p2, p3);
+   if (++n < 600)
+      return;
+   char msg[420];
+   const unsigned wall = SYM_DUS(first, px);
+   cbs = sym_vmw_prof_cbs; cbus = sym_vmw_prof_us; cbbytes = sym_vmw_prof_bytes;
+   snprintf(msg, sizeof(msg), "[symgl] prof/frame us: pre %u flush %u fence %u present %u (map %u copy %u unmap %u) post %u = swap %u, outside swap %u",
+            pre / n, flush / n, fence / n, present / n, sym_prof.map / n, sym_prof.blit / n, sym_prof.unmap / n, post / n, inswap / n, (wall - inswap) / n);
+   symgl_log(msg);
+   snprintf(msg, sizeof(msg), "[symgl] prof/frame2: command buffers %u in %u us, ioctls %u in %u us (objects %u in %u us); 600 swaps in %u ms = %u fps",
+            cbs / n, cbus / n, sym_vmw_prof_ioctls / n, sym_vmw_prof_ioctl_us / n, sym_vmw_prof_objs / n, sym_vmw_prof_obj_us / n, wall / 1000, wall ? 600000000u / wall : 0);
+   symgl_log(msg);
+   last_log = p3;
+   n = flush = fence = present = pre = post = inswap = 0;
+   sym_prof.map = sym_prof.blit = sym_prof.unmap = 0;
+   sym_vmw_prof_cbs = sym_vmw_prof_us = sym_vmw_prof_bytes = sym_vmw_prof_ioctls = sym_vmw_prof_ioctl_us = sym_vmw_prof_objs = sym_vmw_prof_obj_us = 0;
+}
+
 static EGLBoolean
 sym_swap_buffers(_EGLDisplay *disp, _EGLSurface *s)
 {
@@ -213,21 +359,30 @@ sym_swap_buffers(_EGLDisplay *disp, _EGLSurface *s)
    struct sym_buffer *buffer = surf->fb;
 
    if (s->Type != EGL_WINDOW_BIT) {      /* pixmap / pbuffer: eglSwapBuffers is a no-op (EGL 1.4 3.9.1) */
+      if (surf->gpu_pixmap)
+         sym_pixmap_download(surf, st);   /* (the image is what other code sees: it costs nothing to bring it up to date early) */
       st_context_invalidate_state(st, ST_INVALIDATE_FB_STATE);
       return EGL_TRUE;
    }
+   const unsigned pe = symgl_now_us();
    _mesa_glthread_finish(st->ctx);
    /* the frame is complete in its buffer before the compositor gets it: flush, then wait for the GPU */
    struct pipe_fence_handle *fence = NULL;
+   const unsigned p0 = symgl_now_us();
    st_context_flush(st, ST_FLUSH_FRONT, &fence, NULL, NULL);
+   const unsigned p1 = symgl_now_us();
    if (fence) {
       screen->fence_finish(screen, NULL, fence, OS_TIMEOUT_INFINITE);
       screen->fence_reference(screen, &fence, NULL);
    }
+   const unsigned p2 = symgl_now_us();
    buffer->preserve = s->SwapBehavior == EGL_BUFFER_PRESERVED;
-   sym_present_st_framebuffer(buffer, st->pipe);
+   if (!sym_try_scanout(dpy, buffer))
+      sym_present_st_framebuffer(buffer, st->pipe);
+   const unsigned p3 = symgl_now_us();
    update_size(buffer);
    st_context_invalidate_state(st, ST_INVALIDATE_FB_STATE);
+   sym_prof_frame(pe, p0, p1, p2, p3, symgl_now_us());
    return EGL_TRUE;
 }
 
@@ -328,6 +483,7 @@ sym_create_screen(int *fd, int *vmw_fd)
          struct pipe_screen *screen = sws ? svga_screen_create(sws) : NULL;
          if (screen) {
             symgl_log("[symgl] eglInitialize: svga (VMware SVGA3D, host GPU) screen up");
+            sym_scanout_capable = 1;
             return screen;
          }
          symgl_log("[symgl] eglInitialize: svga_screen_create failed -- softpipe");
@@ -783,12 +939,6 @@ sym_create_sgimage_surface(_EGLDisplay *disp, _EGLConfig *conf, void *rsgimage, 
    } else {
       /* softpipe: a display target over the chunk's CPU address */
       struct pipe_screen *screen = dpy->disp->fscreen->screen;
-      if (!screen->resource_create_front) {   /* the svga driver draws in GPU memory: no display target over an image's memory */
-         sym_destroy_st_framebuffer(surf->fb);
-         free(surf);
-         _eglError(EGL_BAD_ALLOC, "eglCreatePixmapSurface: this renderer cannot draw into an RSgImage");
-         return NULL;
-      }
       struct pipe_resource templat;
       memset(&templat, 0, sizeof(templat));
       templat.target = PIPE_TEXTURE_2D;
@@ -797,10 +947,24 @@ sym_create_sgimage_surface(_EGLDisplay *disp, _EGLConfig *conf, void *rsgimage, 
       templat.height0 = l.sg.height;
       templat.depth0 = 1;
       templat.array_size = 1;
-      templat.bind = PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_LINEAR;
-      surf->fb->dt_mem[0].data = l.sg.base;
-      surf->fb->dt_mem[0].stride = l.sg.stride;
-      res = screen->resource_create_front(screen, &templat, &surf->fb->dt_mem[0]);
+      if (!screen->resource_create_front) {
+         /* the svga driver draws in GPU memory: no display target over an image's memory. The surface is a render target of the
+            GPU, kept in step with the image (sym_pixmap_upload / sym_pixmap_download) */
+         templat.bind = PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW;
+         res = screen->resource_create(screen, &templat);
+         surf->sg_base = l.sg.base;
+         surf->sg_stride = l.sg.stride;
+         surf->sg_width = l.sg.width;
+         surf->sg_height = l.sg.height;
+         surf->sg_bpp = l.sg.format == SYMGL_SGFMT_RGB565 ? 2 : 4;
+         surf->gpu_pixmap = res != NULL;
+         surf->upload_pending = 1;
+      } else {
+         templat.bind = PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_LINEAR;
+         surf->fb->dt_mem[0].data = l.sg.base;
+         surf->fb->dt_mem[0].stride = l.sg.stride;
+         res = screen->resource_create_front(screen, &templat, &surf->fb->dt_mem[0]);
+      }
    }
    if (!res) {
       sym_range_remove(surf->range);
@@ -840,6 +1004,8 @@ sym_wait_client(_EGLDisplay *disp, _EGLContext *c)
    if (!ctx || !ctx->st)
       return EGL_TRUE;
    sym_finish_context(dpy, ctx->st);   /* the cache maintenance rides on the jobs (sym_sync_hook) */
+   if (c->DrawSurface && sym_egl_surface(c->DrawSurface)->gpu_pixmap)
+      sym_pixmap_download(sym_egl_surface(c->DrawSurface), ctx->st);
    return EGL_TRUE;
 }
 
@@ -850,6 +1016,11 @@ sym_wait_native(EGLint engine)
    struct sym_egl_display *dpy = sym_the_disp ? sym_egl_display(sym_the_disp) : NULL;
    if (dpy && dpy->fd >= 0)
       sym_ranges_sync(dpy->fd, 1, ~0u);   /* the CPU wrote them, the GPU will read/write (sources: clean only) */
+   if (dpy && dpy->vmw_fd >= 0) {         /* svga pixmaps: the CPU wrote the image, the GPU will draw over it */
+      _EGLContext *cur = _eglGetCurrentContext();
+      if (cur && cur->DrawSurface && sym_egl_surface(cur->DrawSurface)->gpu_pixmap)
+         sym_pixmap_upload(sym_egl_surface(cur->DrawSurface), sym_egl_context(cur)->st->pipe);
+   }
    return EGL_TRUE;
 }
 
@@ -979,12 +1150,16 @@ sym_make_current(_EGLDisplay *disp, _EGLSurface *dsurf, _EGLSurface *rsurf, _EGL
       _eglPutContext(old_ctx);
       return EGL_TRUE;
    }
+   if (old_ctx && old_dsurf && sym_egl_surface(old_dsurf)->gpu_pixmap)   /* the context lets go of a pixmap: the image gets the frame */
+      sym_pixmap_download(sym_egl_surface(old_dsurf), sym_egl_context(old_ctx)->st);
    if (!c) {
       st_api_make_current(NULL, NULL, NULL);
    } else {
       if (d && dsurf != old_dsurf)
          update_size(d->fb);
       st_api_make_current(ctx->st, d ? &d->fb->base : NULL, r ? &r->fb->base : NULL);
+      if (d && d->gpu_pixmap && d->upload_pending)
+         sym_pixmap_upload(d, ctx->st->pipe);
    }
    if (old_dsurf)
       sym_destroy_surface(disp, old_dsurf);

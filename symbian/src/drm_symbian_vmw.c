@@ -24,11 +24,13 @@
 
 #include "xf86drm.h"
 #include "symgl_native.h"
+#include "sym_winsys.h"
 #include "symvmw.h"
 #include "svga/drm/vmwgfx_drm.h"
 #include "svga3d_reg.h"
 #include "svga3d_devcaps.h"
 #include "vmw_surf_defs.h"
+#include "svga/drm/vmw_surface.h"
 #include "util/simple_mtx.h"
 
 #define FD_VMW 0x5B000000
@@ -74,6 +76,9 @@ static struct {
 } V;
 
 static simple_mtx_t vmw_mtx = SIMPLE_MTX_INITIALIZER;
+
+/* S5 profile: command buffers run and the microseconds spent in them (egl_symbian.c prints and clears them) */
+extern unsigned sym_vmw_prof_cbs, sym_vmw_prof_us, sym_vmw_prof_bytes, sym_vmw_prof_ioctls, sym_vmw_prof_ioctl_us, sym_vmw_prof_objs, sym_vmw_prof_obj_us;
 
 static void
 vlog(const char *fmt, ...)
@@ -161,8 +166,12 @@ cmd_run(const struct cmdw *c, uint32_t cid, const char *what)
 {
    uint32_t status = 0, err_off = 0;
    V.submits++;
+   const unsigned t0 = symgl_now_us();
    int r = symvmw_submit(V.v, 0, c->bytes, 0, cid != SVGA3D_INVALID_ID ? 2 : 0, cid != SVGA3D_INVALID_ID ? cid : 0,
                          V.surf_high, V.ctx_high, &status, &err_off);
+   sym_vmw_prof_us += SYM_DUS(t0, symgl_now_us());
+   sym_vmw_prof_cbs++;
+   sym_vmw_prof_bytes += c->bytes;
    if (r != 0 || status != 1) {
       if (V.errors++ < 24)
          vlog("svga: %s: submit r=%d status %u error offset %u (%u bytes, context %u)", what, r, status, err_off, c->bytes,
@@ -343,7 +352,9 @@ do_gb_surface_create(const struct drm_vmw_gb_surface_create_req *rq, uint32_t fl
       }
    if (!sid)
       return -ENOMEM;
-   const uint64_t flags = ((uint64_t)flags_upper << 32) | rq->svga3d_flags;
+   uint64_t flags = ((uint64_t)flags_upper << 32) | rq->svga3d_flags;
+   if (rq->drm_surface_flags & drm_vmw_surface_flag_scanout)
+      flags |= SVGA3D_SURFACE_SCREENTARGET;   /* (vmwgfx does the same: a scan-out surface can be bound to a screen target) */
    const SVGA3dSize size = {rq->base_size.width, rq->base_size.height, rq->base_size.depth};
    const uint32_t layers = rq->array_size ? rq->array_size : (rq->svga3d_flags & SVGA3D_SURFACE_CUBEMAP) ? 6 : 1;
    const uint32_t samples = rq->multisample_count ? rq->multisample_count : 1;
@@ -532,8 +543,17 @@ command(int fd, unsigned long cmd, void *data, unsigned long size)
    if (fd != FD_VMW || !V.v)
       return -EBADF;
    simple_mtx_lock(&vmw_mtx);
+   const unsigned t0 = symgl_now_us();
    int r = dispatch(cmd, data, size);
+   const unsigned t1 = symgl_now_us();
+   const unsigned dt = SYM_DUS(t0, t1);
    simple_mtx_unlock(&vmw_mtx);
+   sym_vmw_prof_ioctls++;
+   sym_vmw_prof_ioctl_us += dt;
+   if (cmd == DRM_VMW_ALLOC_DMABUF || cmd == DRM_VMW_GB_SURFACE_CREATE || cmd == DRM_VMW_GB_SURFACE_CREATE_EXT || cmd == DRM_VMW_UNREF_DMABUF || cmd == DRM_VMW_UNREF_SURFACE) {
+      sym_vmw_prof_objs++;
+      sym_vmw_prof_obj_us += dt;
+   }
    return r;
 }
 
@@ -656,6 +676,111 @@ sym_vmw_close(int fd)
       symvmw_close(V.v);   /* (the kernel driver destroys what is still defined) */
       free(V.bos); free(V.surfs); free(V.ctxs);
       memset(&V, 0, sizeof(V));
+   }
+   simple_mtx_unlock(&vmw_mtx);
+}
+
+/* ---- scan-out takeover (S6) ---------------------------------------------------------------------------------------------------
+ * A full-screen GL window need not go through the window server at all: its render target (created with the scan-out bind: a surface
+ * the device can bind to a screen target) is defined as the VM's screen target, and each frame is one UPDATE_GB_SCREENTARGET -- no
+ * read-back, no copy, no window server. Command buffers run in order, so the update follows the frame's rendering by itself (no fence
+ * wait). The kernel's display driver takes the screen target down again the moment the window server reports a changed rectangle
+ * (symvmw_scanout: 1 while it is still the display); the caller then presents through the window server as before. */
+
+uint32_t
+sym_vmw_surface_id(struct svga_winsys_surface *s)
+{
+   return s ? vmw_svga_winsys_surface(s)->sid : SVGA3D_INVALID_ID;
+}
+
+/* the display mode the kernel driver set through the SVGA registers, 0x0 if it does not drive the display */
+void
+sym_vmw_display_size(unsigned *w, unsigned *h)
+{
+   *w = V.v ? V.info.display_w : 0;
+   *h = V.v ? V.info.display_h : 0;
+}
+
+static struct {
+   uint32_t sid;
+   unsigned w, h;
+} scanout;
+
+static void
+scanout_destroy_locked(void)
+{
+   if (!scanout.sid)
+      return;
+   struct cmdw w;
+   cmd_begin(&w);
+   ((SVGA3dCmdDestroyGBScreenTarget *)cmd_add(&w, SVGA_3D_CMD_DESTROY_GB_SCREENTARGET, sizeof(SVGA3dCmdDestroyGBScreenTarget)))->stid = 0;
+   cmd_run(&w, SVGA3D_INVALID_ID, "screen target destroy");
+   scanout.sid = 0;
+}
+
+/* show surface sid (w x h) as the display; 0 = it is, <0 = it is not (not the display's size, the display driver took it down, a command failed) */
+int
+sym_vmw_scanout_present(uint32_t sid, unsigned w, unsigned h)
+{
+   if (!V.v || sid == SVGA3D_INVALID_ID)
+      return -ENODEV;
+   simple_mtx_lock(&vmw_mtx);
+   int r = 0;
+   if (w != V.info.display_w || h != V.info.display_h) {
+      r = -EINVAL;
+   } else if (scanout.sid && symvmw_scanout(V.v, 2) != 1) {
+      scanout.sid = 0;   /* the display driver took it down: the window server drew something */
+      r = -EBUSY;
+   } else {
+      struct cmdw c;
+      cmd_begin(&c);
+      if (scanout.sid != sid || scanout.w != w || scanout.h != h) {
+         if (scanout.sid)
+            scanout_destroy_locked();
+         cmd_begin(&c);
+         symvmw_scanout(V.v, 1);
+         SVGA3dCmdDefineGBScreenTarget *d = cmd_add(&c, SVGA_3D_CMD_DEFINE_GB_SCREENTARGET, sizeof(*d));
+         memset(d, 0, sizeof(*d));
+         d->stid = 0;
+         d->width = w;
+         d->height = h;
+         d->flags = SVGA_STFLAG_PRIMARY;
+         SVGA3dCmdBindGBScreenTarget *b = cmd_add(&c, SVGA_3D_CMD_BIND_GB_SCREENTARGET, sizeof(*b));
+         memset(b, 0, sizeof(*b));
+         b->stid = 0;
+         b->image.sid = sid;
+         scanout.sid = sid;
+         scanout.w = w;
+         scanout.h = h;
+         vlog("svga: scan-out takeover: surface %u as the %ux%u screen target", sid, w, h);
+      }
+      SVGA3dCmdUpdateGBScreenTarget *u = cmd_add(&c, SVGA_3D_CMD_UPDATE_GB_SCREENTARGET, sizeof(*u));
+      memset(u, 0, sizeof(*u));
+      u->stid = 0;
+      u->rect.w = w;
+      u->rect.h = h;
+      r = cmd_run(&c, SVGA3D_INVALID_ID, "screen target update");
+      if (r != 0) {
+         symvmw_scanout(V.v, 0);
+         scanout.sid = 0;
+      }
+   }
+   simple_mtx_unlock(&vmw_mtx);
+   return r;
+}
+
+/* give the display back (the window left full-screen, the surface is going away) */
+void
+sym_vmw_scanout_end(void)
+{
+   if (!V.v)
+      return;
+   simple_mtx_lock(&vmw_mtx);
+   if (scanout.sid) {
+      if (symvmw_scanout(V.v, 2) == 1)
+         scanout_destroy_locked();
+      scanout.sid = 0;
+      symvmw_scanout(V.v, 0);
    }
    simple_mtx_unlock(&vmw_mtx);
 }
