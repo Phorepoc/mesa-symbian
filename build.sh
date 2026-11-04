@@ -22,6 +22,7 @@ export MESA_SRC="${MESA_SRC:-$HERE/mesa}"
 COMMIT="$(awk '$1 == "commit" {print $2}' "$HERE/mesa.lock")"
 URL="$(awk '$1 == "url" {print $2}' "$HERE/mesa.lock")"
 
+git config --global --add safe.directory "$MESA_SRC" 2>/dev/null || true   # (a cached checkout belongs to the runner user, this runs as root)
 if [ ! -d "$MESA_SRC/.git" ]; then
   git init -q "$MESA_SRC"
   git -C "$MESA_SRC" remote add origin "$URL"
