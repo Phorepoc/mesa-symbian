@@ -34,7 +34,7 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
-FLAGS_VERSION = 2   # bump when base_flags / c_and_cxx / GLOBAL_* / a PATCH of a header change (full rebuild)
+FLAGS_VERSION = 3   # bump when base_flags / c_and_cxx / GLOBAL_* / a PATCH of a header change (full rebuild)
 
 
 
@@ -72,8 +72,11 @@ SEAM = os.path.join(CORE, "os", "src", "symgl")   # symgpu.h + symgl_native.h: c
 DRIVERS = {
     "softpipe": dict(libs=["libsoftpipe", "libws_null"], defs=["-DGALLIUM_SOFTPIPE"]),
     "lima": dict(libs=["liblima", "libpanfrost_shared"], defs=["-DGALLIUM_LIMA"]),
+    # the PC boards' VM GPU (S3): Mesa's svga driver (the VMware SVGA3D device that a hypervisor with 3D shows) and its DRM winsys over the kernel driver's
+    # channel (symbian/src/drm_symbian_vmw.c emulates the vmwgfx ioctls). Like lima: picked at run time when the VM has 3D, else softpipe.
+    "svga": dict(libs=["libsvga", "libsvgadrm"], defs=["-DGALLIUM_SVGA"]),
 }
-ARCHS = {"arm": ["softpipe", "lima"], "x32": ["softpipe"]}
+ARCHS = {"arm": ["softpipe", "lima"], "x32": ["softpipe", "svga"]}
 DRV = ARCHS[ARCH]
 
 # the static libraries phgl.dll is made of
@@ -88,6 +91,7 @@ DROP = {
                      "texcompress_astc.cpp", "texcompress_astc_luts.cpp", "texcompress_astc_luts_wrap.cpp",
                      "anon_file.c", "os_file_notify.c", "u_dl.c", "u_sync_provider.c"},
     "libgallium": {"rtasm_execmem.c"},
+    "libsvgadrm": {"vmw_msg.c", "vmw_screen.c"},   # replaced below (EXTRA): the VMware backdoor port I/O, the fstat / dup of the DRM fd
     "libblake3": {"blake3_sse2_x86-64_unix.S", "blake3_sse41_x86-64_unix.S", "blake3_avx2_x86-64_unix.S",
                   "blake3_avx512_x86-64_unix.S"},
 }
@@ -291,6 +295,38 @@ PATCH = {
     },
 }
 
+# the svga winsys' OS calls: a buffer's CPU mapping is an address in the channel's pool (mmap of the DRM fd on Linux); no 16 MB managed
+# buffer pool (dma_mm: nothing uses it with guest-backed objects, and it would commit 16 MB at screen creation)
+PATCH["libsvgadrm"] = {
+    "vmw_screen_ioctl.c": [
+        ("""      map = os_mmap(NULL, region->size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                 region->drm_fd, region->map_handle);""",
+         """      map = sym_vmw_mmap(region->drm_fd, region->map_handle, region->size);   /* OURS (Symbian) */"""),
+        ("""      os_munmap(region->data, region->size);
+      region->data = NULL;
+   }
+
+   memset(&arg, 0, sizeof(arg));""",
+         """      sym_vmw_munmap(region->data, region->size);
+      region->data = NULL;
+   }
+
+   memset(&arg, 0, sizeof(arg));"""),
+        ("""   --region->map_count;
+   os_munmap(region->data, region->size);""",
+         """   --region->map_count;
+   sym_vmw_munmap(region->data, region->size);""")],
+    "vmw_screen_pools.c": [
+        ("""   vws->pools.dma_mm = mm_bufmgr_create(vws->pools.dma_base,
+                                        VMW_GMR_POOL_SIZE,
+                                        12 /* 4096 alignment */);
+   if (!vws->pools.dma_mm)
+      goto error;
+""",
+         """   vws->pools.dma_mm = NULL;   /* OURS (Symbian): the 16 MB managed pool is not used with guest-backed objects */
+""")],
+}
+
 if ARCH == "x32":
     # x86 only: gallium's vertex translator JIT-compiles x86 code at run time (translate_sse.c over rtasm's executable
     # memory, rtasm_execmem.c: dropped above). A Symbian process has no memory it can both write and run, so the
@@ -307,6 +343,13 @@ MIRROR = {"libsoftpipe": "src/gallium/drivers/softpipe"}
 # OURS sources added to a library (compiled with that library's include dirs + macros)
 EXTRA = {
     "libmesa_util": ["posix_extra.c", "cxx_extra.cpp"],
+    "libsvgadrm": ["vmw_msg_symbian.c", "vmw_screen_symbian.c"],
+}
+
+# compile flags added to every TU of a library
+LIBFLAGS = {
+    # its libdrm calls (drmGetVersion ...) go to the vmwgfx emulation; vmwgfx_drm.h includes "drm.h" from Mesa's drm-uapi copy
+    "libsvgadrm": ["-DSYM_VMW_WINSYS", "-I" + os.path.join(MESA, "include/drm-uapi")],
 }
 
 # libraries meson does not build in our configure (EGL is off there: its DRI driver needs libdrm + a loader) --
@@ -316,16 +359,18 @@ _EGL_MAIN = ["eglapi.c", "eglarray.c", "eglconfigdebug.c", "eglconfig.c", "eglco
 PSEUDO = {
     # Mesa's EGL core + OUR Symbian driver/frontend/winsys (symbian/src; egl_symbian.c says why HAIKU)
     "libegl_symbian": dict(
-        borrow=["libsoftpipe", "libmesa"] + (["liblima"] if "lima" in DRV else []),
+        borrow=["libsoftpipe", "libmesa"] + (["liblima"] if "lima" in DRV else []) + (["libsvga"] if "svga" in DRV else []),
         incs=[os.path.join(MESA, "src/egl"), os.path.join(MESA, "src/egl/main"),
               os.path.join(MESA, "src/gallium/drivers"), os.path.join(MESA, "src/gallium/winsys"),
-              os.path.join(SHIM, "src")],
+              os.path.join(SHIM, "src")]
+             + ([os.path.join(MESA, "src/gallium/drivers/svga"), os.path.join(MESA, "src/gallium/drivers/svga/include"),
+                 os.path.join(MESA, "src/gallium/winsys/svga/drm"), os.path.join(MESA, "include/drm-uapi")] if "svga" in DRV else []),
         defs=["-D_EGL_NATIVE_PLATFORM=_EGL_PLATFORM_HAIKU", "-D_EGL_BUILT_IN_DRIVER_HAIKU"]
              + [x for d in DRV for x in DRIVERS[d]["defs"]],
         srcs=[os.path.join(MESA, "src/egl/main", f) for f in _EGL_MAIN]
              + [os.path.join(MESA, "src/util/streaming-load-memcpy.c")]   # was a link stub (not in libmesa_util's list): readpixels from WC memory (st_pbo_compute); a plain memcpy on ARM32
-             + [os.path.join(SHIM, "src", f) for f in ("egl_symbian.c", "sym_frontend.c", "sym_winsys.c",
-                                                        "drm_symbian.c")]),
+             + [os.path.join(SHIM, "src", f) for f in ("egl_symbian.c", "sym_frontend.c", "sym_winsys.c", "drm_symbian.c")
+                                + (("drm_symbian_vmw.c",) if "svga" in DRV else ())]),
 }
 
 # the public GLES entry points (glClear ...): Mesa builds them into libGLESv2.so / libGLESv1_CM.so, which our
@@ -616,6 +661,7 @@ def main() -> int:
         if any(rel.endswith("/" + x) or rel == x or os.path.basename(rel) == x for x in DROP.get(lib, ())):
             continue
         extra, src = tu_flags(e)
+        extra = extra + LIBFLAGS.get(lib, [])
         obj = os.path.join(OUT, "obj", lib, os.path.basename(e["output"]))
         edits = PATCH.get(lib, {}).get(os.path.basename(src))
         if lib in mirrors and os.path.dirname(src) == mirrors[lib][0]:

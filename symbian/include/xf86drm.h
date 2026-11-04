@@ -82,6 +82,32 @@ int drmSyncobjWait(int fd, uint32_t *handles, unsigned num_handles, int64_t time
 int drmSyncobjImportSyncFile(int fd, uint32_t handle, int sync_file_fd);
 int drmSyncobjExportSyncFile(int fd, uint32_t handle, int *sync_file_fd);
 
+/* --- the vmwgfx command interface (drm_symbian_vmw.c): DRM_COMMAND_BASE-relative indexes, 0 or -errno ----------------- */
+int drmCommandNone(int fd, unsigned long drmCommandIndex);
+int drmCommandRead(int fd, unsigned long drmCommandIndex, void *data, unsigned long size);
+int drmCommandWrite(int fd, unsigned long drmCommandIndex, void *data, unsigned long size);
+int drmCommandWriteRead(int fd, unsigned long drmCommandIndex, void *data, unsigned long size);
+drmVersionPtr sym_vmw_drmGetVersion(int fd);
+void sym_vmw_drmFreeVersion(drmVersionPtr v);
+int sym_vmw_drmPrimeHandleToFD(int fd, uint32_t handle, uint32_t flags, int *prime_fd);
+int sym_vmw_drmPrimeFDToHandle(int fd, int prime_fd, uint32_t *handle);
+/* the VMware SVGA3D device: a fake fd (>= 0) or -1 when this VM has no 3D; mmap of a buffer = an address in the channel's pool */
+int sym_vmw_open(void);
+void sym_vmw_close(int fd);
+void *sym_vmw_mmap(int fd, uint64_t offset, size_t size);
+void sym_vmw_munmap(void *p, size_t size);
+
+#ifdef SYM_VMW_WINSYS   /* compiling the svga DRM winsys (build_mesa_symbian.py): its libdrm calls go to the vmwgfx emulation */
+#include <errno.h>
+#ifndef ERESTART
+#define ERESTART EINTR   /* (Linux: the syscall is restarted; nothing is interrupted here) */
+#endif
+#define drmGetVersion sym_vmw_drmGetVersion
+#define drmFreeVersion sym_vmw_drmFreeVersion
+#define drmPrimeHandleToFD sym_vmw_drmPrimeHandleToFD
+#define drmPrimeFDToHandle sym_vmw_drmPrimeFDToHandle
+#endif
+
 /* --- the Symbian side of the shim (drm_symbian.c) ----------------------------------------------------------- */
 
 /* open the Mali: a fake DRM fd (>= 0) or -1 when there is no GPU */

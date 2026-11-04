@@ -36,6 +36,16 @@
 #define MAX_IMPORT 16
 #define MAX_FREE 1024
 #define COMMIT_STEP (4u << 20)
+
+/* an index into a table by (fd - base): the compiler must not fold the fd base (0x5A......) into the table's address -- on x32 that is a
+ * relocation "the_dev - 0x67fd94a8" (R_X86_64_32) the linker rejects once the code is linked in (the svga winsys uses sync_wait) */
+static inline int
+fd_index(int fd, int base)
+{
+   int i = fd - base;
+   __asm__("" : "+r"(i));
+   return i;
+}
 #define PAGE 4096u
 
 struct syncpt {
@@ -152,7 +162,7 @@ static uint32_t pp_written_imports;      /* imports written by PP jobs since the
 int
 sym_drm_import_bit(int prime_fd)
 {
-   const int i = prime_fd - (FD_BASE + FD_IMPORT);
+   const int i = fd_index(prime_fd, FD_BASE + FD_IMPORT);
    return i >= 0 && i < MAX_IMPORT ? i : -1;
 }
 
@@ -650,7 +660,7 @@ static int
 drmPrimeFDToHandle_unlocked(int fd, int prime_fd, uint32_t *handle)
 {
    struct dev *d = dev_of(fd);
-   int idx = prime_fd - (FD_BASE + FD_IMPORT);
+   int idx = fd_index(prime_fd, FD_BASE + FD_IMPORT);
    if (!d || idx < 0 || idx >= MAX_IMPORT || !d->imports[idx].used)
       return -EBADF;
    struct import *im = &d->imports[idx];
@@ -736,7 +746,7 @@ syncfd_new(struct dev *d, const struct syncpt *pt)
 static struct syncpt *
 syncfd_of(struct dev *d, int fd)
 {
-   int i = fd - (FD_BASE + FD_SYNC);
+   int i = fd_index(fd, FD_BASE + FD_SYNC);
    if (i < 0 || i >= MAX_SYNCFD || !d->syncfd_used[i])
       return NULL;
    return &d->syncfd[i];
@@ -906,7 +916,7 @@ sym_drm_import_addr_unlocked(int fd, const void *addr, uint32_t size)
 static struct import *
 import_of(struct dev *d, int prime_fd)
 {
-   int i = prime_fd - (FD_BASE + FD_IMPORT);
+   int i = fd_index(prime_fd, FD_BASE + FD_IMPORT);
    if (!d || i < 0 || i >= MAX_IMPORT || !d->imports[i].used)
       return NULL;
    return &d->imports[i];
@@ -979,7 +989,7 @@ sym_drm_munmap_unlocked(void *p, size_t size)
 static void
 sym_drm_close_fd_unlocked(int fd)
 {
-   int i = fd - (FD_BASE + FD_SYNC);
+   int i = fd_index(fd, FD_BASE + FD_SYNC);
    if (i >= 0 && i < MAX_SYNCFD)
       the_dev.syncfd_used[i] = 0;
 }

@@ -34,7 +34,7 @@ fi
 HOST="$PHOREPOC_BUILD/mesa-build/host"
 if [ ! -f "$HOST/compile_commands.json" ]; then
   meson setup "$HOST" "$MESA_SRC" -Dbuildtype=release -Dplatforms= -Degl=disabled -Dglx=disabled -Dgbm=disabled \
-    -Dgallium-drivers=softpipe,lima -Dvulkan-drivers= -Dllvm=disabled -Dgles1=enabled -Dgles2=enabled -Dopengl=true \
+    -Dgallium-drivers=softpipe,lima,svga -Dvulkan-drivers= -Dllvm=disabled -Dgles1=enabled -Dgles2=enabled -Dopengl=true \
     -Dshader-cache=disabled -Dxmlconfig=disabled -Dzlib=disabled -Dzstd=disabled -Dexpat=disabled -Dvalgrind=disabled \
     -Dlibunwind=disabled -Dbuild-tests=false -Dlmsensors=disabled -Ddisplay-info=disabled -Dgallium-va=disabled \
     -Dvideo-codecs= -Dtools=

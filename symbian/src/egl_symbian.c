@@ -45,12 +45,19 @@ struct renderonly;
 struct pipe_screen *lima_screen_create(int fd, const struct pipe_screen_config *config, struct renderonly *ro);
 #endif
 
+#ifdef GALLIUM_SVGA
+#include "svga/svga_public.h"
+#include "svga/drm/svga_drm_public.h"
+#endif
+
 _EGL_DRIVER_STANDARD_TYPECASTS(sym_egl)
 
 struct sym_egl_display {
    int ref_count;
    struct sym_display *disp;
    int fd;                      /* the Mali, -1 = softpipe */
+   int vmw_fd;                  /* the VMware SVGA3D device (drm_symbian_vmw.c), -1 = none. The window path is the softpipe one (fd < 0): the frame is
+                                   read back from the GPU and copied into the window */
 };
 
 struct sym_egl_config {
@@ -281,14 +288,19 @@ sym_display_destroy(_EGLDisplay *disp)
    screen->destroy(screen);
    if (dpy->fd >= 0)
       sym_drm_close(dpy->fd);
+#ifdef GALLIUM_SVGA
+   if (dpy->vmw_fd >= 0)
+      sym_vmw_close(dpy->vmw_fd);
+#endif
    free(dpy);
    disp->DriverData = NULL;
 }
 
 static struct pipe_screen *
-sym_create_screen(int *fd)
+sym_create_screen(int *fd, int *vmw_fd)
 {
    *fd = -1;
+   *vmw_fd = -1;
 #ifdef GALLIUM_LIMA
    if (!getenv("SYMGL_SOFTPIPE")) {
       *fd = sym_drm_open();
@@ -303,6 +315,24 @@ sym_create_screen(int *fd)
          symgl_log("[symgl] eglInitialize: lima_screen_create failed -- softpipe");
          sym_drm_close(*fd);
          *fd = -1;
+      }
+   }
+#endif
+#ifdef GALLIUM_SVGA
+   /* a VM with a VMware SVGA3D device: the host GPU through Mesa's svga driver; no device, 3D off, or any failure
+      below: the software renderer */
+   if (!getenv("SYMGL_SOFTPIPE")) {
+      *vmw_fd = sym_vmw_open();
+      if (*vmw_fd >= 0) {
+         struct svga_winsys_screen *sws = svga_drm_winsys_screen_create(*vmw_fd);
+         struct pipe_screen *screen = sws ? svga_screen_create(sws) : NULL;
+         if (screen) {
+            symgl_log("[symgl] eglInitialize: svga (VMware SVGA3D, host GPU) screen up");
+            return screen;
+         }
+         symgl_log("[symgl] eglInitialize: svga_screen_create failed -- softpipe");
+         sym_vmw_close(*vmw_fd);
+         *vmw_fd = -1;
       }
    }
 #endif
@@ -753,6 +783,12 @@ sym_create_sgimage_surface(_EGLDisplay *disp, _EGLConfig *conf, void *rsgimage, 
    } else {
       /* softpipe: a display target over the chunk's CPU address */
       struct pipe_screen *screen = dpy->disp->fscreen->screen;
+      if (!screen->resource_create_front) {   /* the svga driver draws in GPU memory: no display target over an image's memory */
+         sym_destroy_st_framebuffer(surf->fb);
+         free(surf);
+         _eglError(EGL_BAD_ALLOC, "eglCreatePixmapSurface: this renderer cannot draw into an RSgImage");
+         return NULL;
+      }
       struct pipe_resource templat;
       memset(&templat, 0, sizeof(templat));
       templat.target = PIPE_TEXTURE_2D;
@@ -839,7 +875,7 @@ sym_initialize(_EGLDisplay *disp)
    dpy = calloc(1, sizeof(*dpy));
    if (!dpy)
       return _eglError(EGL_BAD_ALLOC, "eglInitialize");
-   struct pipe_screen *screen = sym_create_screen(&dpy->fd);
+   struct pipe_screen *screen = sym_create_screen(&dpy->fd, &dpy->vmw_fd);
    if (!screen) {
       free(dpy);
       return _eglError(EGL_NOT_INITIALIZED, "eglInitialize: no pipe screen");
