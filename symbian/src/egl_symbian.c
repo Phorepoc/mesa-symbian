@@ -186,8 +186,7 @@ sym_pixmap_upload(struct sym_egl_surface *surf, struct pipe_context *pipe)
    struct pipe_box box;
    u_box_2d(0, 0, surf->sg_width, surf->sg_height, &box);
    pipe->texture_subdata(pipe, res, 0, PIPE_MAP_WRITE, &box, surf->sg_base, surf->sg_stride, 0);
-   surf->upload_pending = 0;
-}
+   surf->upload_pending = 0;}
 
 static void
 sym_pixmap_download(struct sym_egl_surface *surf, struct st_context *st)
@@ -1013,12 +1012,14 @@ static EGLBoolean
 sym_wait_native(EGLint engine)
 {
    (void)engine;
-   struct sym_egl_display *dpy = sym_the_disp ? sym_egl_display(sym_the_disp) : NULL;
+   /* the current context's display, not sym_the_disp: that is set only where the Mali imports EGLImages (fd >= 0), so the
+      svga pixmap upload below never ran (glpixmaptest step 3) */
+   _EGLContext *cur = _eglGetCurrentContext();
+   struct sym_egl_display *dpy = cur ? sym_egl_display(cur->Resource.Display) : NULL;
    if (dpy && dpy->fd >= 0)
       sym_ranges_sync(dpy->fd, 1, ~0u);   /* the CPU wrote them, the GPU will read/write (sources: clean only) */
    if (dpy && dpy->vmw_fd >= 0) {         /* svga pixmaps: the CPU wrote the image, the GPU will draw over it */
-      _EGLContext *cur = _eglGetCurrentContext();
-      if (cur && cur->DrawSurface && sym_egl_surface(cur->DrawSurface)->gpu_pixmap)
+      if (cur->DrawSurface && sym_egl_surface(cur->DrawSurface)->gpu_pixmap)
          sym_pixmap_upload(sym_egl_surface(cur->DrawSurface), sym_egl_context(cur)->st->pipe);
    }
    return EGL_TRUE;
