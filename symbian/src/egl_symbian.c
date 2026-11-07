@@ -53,6 +53,12 @@ extern uint32_t sym_vmw_surface_id(struct svga_winsys_surface *s);
 extern void sym_vmw_display_size(unsigned *w, unsigned *h);
 extern int sym_vmw_scanout_present(uint32_t sid, unsigned w, unsigned h);
 extern void sym_vmw_scanout_end(void);
+#include "cso_cache/cso_context.h"
+#include "util/simple_mtx.h"
+#include "util/u_draw_quad.h"
+#include "util/u_inlines.h"
+#include "util/u_sampler.h"
+#include "util/u_simple_shaders.h"
 #endif
 
 _EGL_DRIVER_STANDARD_TYPECASTS(sym_egl)
@@ -250,6 +256,159 @@ sym_query_surface(_EGLDisplay *disp, _EGLSurface *s, EGLint attribute, EGLint *v
 extern unsigned sym_vmw_prof_cbs, sym_vmw_prof_us, sym_vmw_prof_bytes, sym_vmw_prof_ioctls, sym_vmw_prof_ioctl_us, sym_vmw_prof_objs, sym_vmw_prof_obj_us;
 
 #ifdef GALLIUM_SVGA
+/* S6b: a full-screen window in a rotated screen mode (wsini.txt: a landscape application on the portrait display). The window
+ * server turns what the application draws onto the display in software (the screen driver's DeOrientate); a screen target
+ * cannot rotate, so the GPU does it: the finished frame is drawn, turned the window server's way, into a surface of the
+ * display's own size, and that surface is the screen target. The pass has a pipe context of its own on the same screen, so
+ * the application's GL state is never touched; the frame it samples is complete (the swap waited for its fence), and the pass
+ * waits for its own before the screen target shows it. One per process (the display is one). */
+static struct {
+   simple_mtx_t lock;
+   struct pipe_context *pipe;
+   struct cso_context *cso;
+   void *vs, *fs;
+   struct pipe_resource *target;   /* the display's size, shown as the screen target */
+   int failed;                     /* the pass could not be set up: rotated windows go through the window server */
+} sym_rot = { SIMPLE_MTX_INITIALIZER };
+
+/* the frame in src, turned by degrees (90 / 180 / 270, the screen mode's rotation) into a dw x dh surface; NULL = not possible */
+static struct pipe_resource *
+sym_rotate_for_scanout(struct pipe_screen *screen, struct pipe_resource *src, unsigned dw, unsigned dh, int degrees)
+{
+   simple_mtx_lock(&sym_rot.lock);
+   struct pipe_resource *out = NULL;
+   struct pipe_sampler_view *view = NULL;
+   if (sym_rot.failed)
+      goto done;
+   if (!sym_rot.pipe) {
+      static const enum tgsi_semantic names[] = { TGSI_SEMANTIC_POSITION, TGSI_SEMANTIC_GENERIC };
+      static const unsigned indexes[] = { 0, 0 };
+      sym_rot.pipe = screen->context_create(screen, NULL, 0);
+      if (sym_rot.pipe)
+         sym_rot.cso = cso_create_context(sym_rot.pipe, 0);
+      if (sym_rot.cso) {
+         sym_rot.vs = util_make_vertex_passthrough_shader(sym_rot.pipe, 2, names, indexes, false);
+         sym_rot.fs = util_make_fragment_tex_shader(sym_rot.pipe, TGSI_TEXTURE_2D, TGSI_RETURN_TYPE_FLOAT, TGSI_RETURN_TYPE_FLOAT,
+                                                    false, false);
+      }
+      if (!sym_rot.vs || !sym_rot.fs) {
+         symgl_log("[symgl] scan-out: no rotation pass (context or shaders); a rotated screen mode goes through the window server");
+         sym_rot.failed = 1;
+         goto done;
+      }
+   }
+   if (!sym_rot.target || sym_rot.target->width0 != dw || sym_rot.target->height0 != dh || sym_rot.target->format != src->format) {
+      pipe_resource_reference(&sym_rot.target, NULL);
+      struct pipe_resource t;
+      memset(&t, 0, sizeof(t));
+      t.target = PIPE_TEXTURE_2D;
+      t.format = src->format;
+      t.width0 = dw;
+      t.height0 = dh;
+      t.depth0 = 1;
+      t.array_size = 1;
+      t.bind = PIPE_BIND_RENDER_TARGET | PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_SCANOUT;
+      sym_rot.target = screen->resource_create(screen, &t);
+      if (!sym_rot.target)
+         goto done;
+   }
+   struct pipe_context *pipe = sym_rot.pipe;
+   struct cso_context *cso = sym_rot.cso;
+
+   struct pipe_framebuffer_state fb;
+   memset(&fb, 0, sizeof(fb));
+   fb.width = dw;
+   fb.height = dh;
+   fb.nr_cbufs = 1;
+   fb.cbufs[0].format = sym_rot.target->format;
+   fb.cbufs[0].texture = sym_rot.target;
+   cso_set_framebuffer(cso, &fb);
+   struct pipe_blend_state blend;
+   memset(&blend, 0, sizeof(blend));
+   blend.rt[0].colormask = PIPE_MASK_RGBA;
+   cso_set_blend(cso, &blend);
+   struct pipe_depth_stencil_alpha_state dsa;
+   memset(&dsa, 0, sizeof(dsa));
+   cso_set_depth_stencil_alpha(cso, &dsa);
+   struct pipe_rasterizer_state rs;
+   memset(&rs, 0, sizeof(rs));
+   rs.half_pixel_center = 1;
+   rs.bottom_edge_rule = 1;
+   rs.depth_clip_near = 1;
+   rs.depth_clip_far = 1;
+   cso_set_rasterizer(cso, &rs);
+   struct pipe_viewport_state vp;
+   memset(&vp, 0, sizeof(vp));
+   vp.scale[0] = 0.5f * dw;
+   vp.scale[1] = 0.5f * dh;
+   vp.scale[2] = 1.0f;
+   vp.translate[0] = 0.5f * dw;
+   vp.translate[1] = 0.5f * dh;
+   vp.swizzle_x = PIPE_VIEWPORT_SWIZZLE_POSITIVE_X;
+   vp.swizzle_y = PIPE_VIEWPORT_SWIZZLE_POSITIVE_Y;
+   vp.swizzle_z = PIPE_VIEWPORT_SWIZZLE_POSITIVE_Z;
+   vp.swizzle_w = PIPE_VIEWPORT_SWIZZLE_POSITIVE_W;
+   cso_set_viewport(cso, &vp);
+   cso_set_sample_mask(cso, ~0u);
+   struct pipe_sampler_state ss;
+   memset(&ss, 0, sizeof(ss));
+   ss.wrap_s = ss.wrap_t = ss.wrap_r = PIPE_TEX_WRAP_CLAMP_TO_EDGE;
+   ss.min_img_filter = ss.mag_img_filter = PIPE_TEX_FILTER_NEAREST;   /* (a quarter turn maps texel to pixel one to one) */
+   ss.min_mip_filter = PIPE_TEX_MIPFILTER_NONE;
+   const struct pipe_sampler_state *samplers[] = { &ss };
+   cso_set_samplers(cso, MESA_SHADER_FRAGMENT, 1, samplers);
+   struct pipe_sampler_view tmpl;
+   u_sampler_view_default_template(&tmpl, src, src->format);
+   view = pipe->create_sampler_view(pipe, src, &tmpl);
+   if (!view)
+      goto done;
+   pipe->set_sampler_views(pipe, MESA_SHADER_FRAGMENT, 0, 1, 0, &view);
+   cso_set_vertex_shader_handle(cso, sym_rot.vs);
+   cso_set_fragment_shader_handle(cso, sym_rot.fs);
+
+   /* the display's corners (top left, top right, bottom left, bottom right; row 0 is the top in both surfaces) and the point of
+      the frame each shows. 90: the window server puts the frame's (x, y) at the display's (width - 1 - y, x), so the display's
+      (X, Y) shows the frame's (Y, width - 1 - X): u = Y, v = 1 - X in [0, 1] coordinates. 270 is the opposite turn, 180 both
+      axes. */
+   static const float uv90[8] = { 0, 1,  0, 0,  1, 1,  1, 0 };
+   static const float uv180[8] = { 1, 1,  0, 1,  1, 0,  0, 0 };
+   static const float uv270[8] = { 1, 0,  1, 1,  0, 0,  0, 1 };
+   static const float xy[8] = { -1, -1,  1, -1,  -1, 1,  1, 1 };
+   const float *uv = degrees == 90 ? uv90 : degrees == 180 ? uv180 : uv270;
+   float verts[4][8];
+   for (unsigned i = 0; i < 4; i++) {
+      verts[i][0] = xy[2 * i];
+      verts[i][1] = xy[2 * i + 1];
+      verts[i][2] = 0.0f;
+      verts[i][3] = 1.0f;
+      verts[i][4] = uv[2 * i];
+      verts[i][5] = uv[2 * i + 1];
+      verts[i][6] = 0.0f;
+      verts[i][7] = 0.0f;
+   }
+   struct cso_velems_state ve;
+   memset(&ve, 0, sizeof(ve));
+   ve.count = 2;
+   for (unsigned i = 0; i < 2; i++) {
+      ve.velems[i].src_format = PIPE_FORMAT_R32G32B32A32_FLOAT;
+      ve.velems[i].src_offset = i * 16;
+      ve.velems[i].src_stride = sizeof(verts[0]);
+   }
+   util_draw_user_vertices(cso, &ve, verts, MESA_PRIM_TRIANGLE_STRIP, 4);
+   pipe->set_sampler_views(pipe, MESA_SHADER_FRAGMENT, 0, 0, 1, NULL);
+   struct pipe_fence_handle *fence = NULL;
+   pipe->flush(pipe, &fence, 0);
+   if (fence) {
+      screen->fence_finish(screen, NULL, fence, OS_TIMEOUT_INFINITE);
+      screen->fence_reference(screen, &fence, NULL);
+   }
+   out = sym_rot.target;
+done:
+   pipe_sampler_view_reference(&view, NULL);
+   simple_mtx_unlock(&sym_rot.lock);
+   return out;
+}
+
 /* S6: a full-screen GL window on the svga renderer bypasses the window server: its render target is the VM's screen target and a swap is one
  * UPDATE_GB_SCREENTARGET (drm_symbian_vmw.c). The kernel's display driver takes the screen target down again as soon as the window server
  * draws anything (a note, a pointer, another window on top, the window leaving full-screen); the frame after that goes through the window
@@ -270,7 +429,9 @@ sym_try_scanout(struct sym_egl_display *dpy, struct sym_buffer *buffer)
    if (!dw || !dh)
       return false;
    if (!buffer->scanout_on || buffer->fs_check-- <= 0) {   /* (window server round trips: before every new attempt, then now and then; the display driver notices anything that matters at once) */
-      buffer->fullscreen = symgl_window_fullscreen(buffer->native_window, dw, dh);
+      buffer->rotation = symgl_window_display_rotation(buffer->native_window);
+      const int quarter = buffer->rotation == 90 || buffer->rotation == 270;   /* (the window is the display's size turned) */
+      buffer->fullscreen = symgl_window_fullscreen(buffer->native_window, quarter ? dh : dw, quarter ? dw : dh);
       buffer->fs_check = 120;
    }
    if (!buffer->fullscreen) {
@@ -280,7 +441,13 @@ sym_try_scanout(struct sym_egl_display *dpy, struct sym_buffer *buffer)
       }
       return false;
    }
-   const int r = sym_vmw_scanout_present(sym_vmw_surface_id(svga_texture(back)->handle), buffer->width, buffer->height);
+   struct pipe_resource *shown = back;
+   if (buffer->rotation) {
+      shown = sym_rotate_for_scanout(dpy->disp->fscreen->screen, back, dw, dh, buffer->rotation);
+      if (!shown)
+         return false;
+   }
+   const int r = sym_vmw_scanout_present(sym_vmw_surface_id(svga_texture(shown)->handle), shown->width0, shown->height0);
    if (r != 0) {
       if (buffer->scanout_on)
          symgl_log("[symgl] scan-out: handed back to the window server");
@@ -297,7 +464,11 @@ sym_try_scanout(struct sym_egl_display *dpy, struct sym_buffer *buffer)
       return false;
    }
    if (!buffer->scanout_on) {
-      symgl_log("[symgl] scan-out: this window is the display (GPU screen target, no window server)");
+      char msg[120];
+      snprintf(msg, sizeof(msg), "[symgl] scan-out: this window is the display (GPU screen target, no window server)%s",
+               buffer->rotation == 90 ? ", turned 90" : buffer->rotation == 180 ? ", turned 180" :
+               buffer->rotation == 270 ? ", turned 270" : "");
+      symgl_log(msg);
       buffer->scanout_since = now ? now : 1;
       if (!buffer->scanout_backoff)
          buffer->scanout_backoff = 1500000u;

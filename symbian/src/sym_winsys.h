@@ -49,6 +49,7 @@ struct sym_buffer {
    /* S6: scan-out takeover of a full-screen window on the svga renderer (egl_symbian.c sym_try_scanout) */
    unsigned scanout_off_until;           /* symgl_now_us(): no new attempt before it */
    int fullscreen, fs_check, scanout_on;
+   int rotation;                         /* the screen mode's rotation in degrees (S6b: the GPU turns the frame for the screen target) */
    unsigned scanout_since, scanout_backoff;   /* symgl_now_us() of the takeover; the wait after a hand-back (us) */
 };
 
