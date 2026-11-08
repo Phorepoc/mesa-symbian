@@ -503,15 +503,16 @@ sym_prof_frame(unsigned pe, unsigned p0, unsigned p1, unsigned p2, unsigned p3, 
    char msg[420];
    const unsigned wall = SYM_DUS(first, px);
    cbs = sym_vmw_prof_cbs; cbus = sym_vmw_prof_us; cbbytes = sym_vmw_prof_bytes;
-   snprintf(msg, sizeof(msg), "[symgl] prof/frame us: pre %u flush %u fence %u present %u (map %u copy %u unmap %u) post %u = swap %u, outside swap %u",
-            pre / n, flush / n, fence / n, present / n, sym_prof.map / n, sym_prof.blit / n, sym_prof.unmap / n, post / n, inswap / n, (wall - inswap) / n);
+   snprintf(msg, sizeof(msg), "[symgl] prof/frame us: pre %u flush %u fence %u present %u (map %u copy %u unmap %u | clean %u show %u acquire %u invalidate %u) post %u = swap %u, outside swap %u",
+            pre / n, flush / n, fence / n, present / n, sym_prof.map / n, sym_prof.blit / n, sym_prof.unmap / n,
+            sym_prof.sync1 / n, sym_prof.show / n, sym_prof.acquire / n, sym_prof.sync2 / n, post / n, inswap / n, (wall - inswap) / n);
    symgl_log(msg);
    snprintf(msg, sizeof(msg), "[symgl] prof/frame2: command buffers %u in %u us, ioctls %u in %u us (objects %u in %u us); 600 swaps in %u ms = %u fps",
             cbs / n, cbus / n, sym_vmw_prof_ioctls / n, sym_vmw_prof_ioctl_us / n, sym_vmw_prof_objs / n, sym_vmw_prof_obj_us / n, wall / 1000, wall ? 600000000u / wall : 0);
    symgl_log(msg);
    last_log = p3;
    n = flush = fence = present = pre = post = inswap = 0;
-   sym_prof.map = sym_prof.blit = sym_prof.unmap = 0;
+   memset(&sym_prof, 0, sizeof(sym_prof));
    sym_vmw_prof_cbs = sym_vmw_prof_us = sym_vmw_prof_bytes = sym_vmw_prof_ioctls = sym_vmw_prof_ioctl_us = sym_vmw_prof_objs = sym_vmw_prof_obj_us = 0;
 }
 

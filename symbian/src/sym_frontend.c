@@ -275,12 +275,20 @@ sym_present_st_framebuffer(struct sym_buffer *buffer, struct pipe_context *pipe)
       return;
    }
    const int done = buffer->cur;
+   const unsigned t0 = symgl_now_us();
    if (buffer->fd >= 0)   /* the GPU wrote it, the compositor's CPU reads it */
       sym_drm_cache_sync(buffer->fd, buffer->prime_fd, buffer->surf.offset[done], buffer->surf.buf_size, 2);
+   const unsigned t1 = symgl_now_us();
    symgl_window_present(buffer->native_window, done);
+   const unsigned t2 = symgl_now_us();
    buffer->cur = symgl_window_acquire(buffer->native_window);
+   const unsigned t3 = symgl_now_us();
    if (buffer->fd >= 0)   /* the compositor's CPU read it, the GPU will write it */
       sym_drm_cache_sync(buffer->fd, buffer->prime_fd, buffer->surf.offset[buffer->cur], buffer->surf.buf_size, 1);
+   sym_prof.sync1 += SYM_DUS(t0, t1);
+   sym_prof.show += SYM_DUS(t1, t2);
+   sym_prof.acquire += SYM_DUS(t2, t3);
+   sym_prof.sync2 += SYM_DUS(t3, symgl_now_us());
    /* EGL_BUFFER_PRESERVED (EGL 1.4 3.9.1: the colour buffer survives the swap): the acquired slot holds a frame from
       SYMGL_NBUF-1 swaps ago, so the frame just presented is copied into it on the GPU, queued before the next frame's
       drawing (Qt's QGLWidget asks for preserved swaps and has no GL context without such a config) */

@@ -61,7 +61,9 @@ struct sym_display {
 };
 
 /* S5: where the time of a frame goes (microseconds, summed; egl_symbian.c prints them every 120 swaps) */
-struct sym_prof { unsigned map, blit, unmap; };
+/* (map/blit/unmap: the copy present; sync1/show/acquire/sync2: the window-surface present -- cache clean, hand-over to the
+   compositor, the wait for a free buffer, cache invalidate) */
+struct sym_prof { unsigned map, blit, unmap, sync1, show, acquire, sync2; };
 extern struct sym_prof sym_prof;
 /* an elapsed time from two symgl_now_us() readings; the CPUs' counters are not in step, so a negative difference counts as 0 */
 #define SYM_DUS(a, b) ((int)((b) - (a)) < 0 ? 0u : (unsigned)((b) - (a)))
