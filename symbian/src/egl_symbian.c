@@ -353,7 +353,7 @@ sym_rotate_for_scanout(struct pipe_screen *screen, struct pipe_resource *src, un
    struct pipe_sampler_state ss;
    memset(&ss, 0, sizeof(ss));
    ss.wrap_s = ss.wrap_t = ss.wrap_r = PIPE_TEX_WRAP_CLAMP_TO_EDGE;
-   ss.min_img_filter = ss.mag_img_filter = PIPE_TEX_FILTER_NEAREST;   /* (a quarter turn maps texel to pixel one to one) */
+   ss.min_img_filter = ss.mag_img_filter = PIPE_TEX_FILTER_NEAREST;   /* (a quarter turn maps texel to pixel one to one; a 2x screen doubles every pixel, as the kernel does) */
    ss.min_mip_filter = PIPE_TEX_MIPFILTER_NONE;
    const struct pipe_sampler_state *samplers[] = { &ss };
    cso_set_samplers(cso, MESA_SHADER_FRAGMENT, 1, samplers);
@@ -370,11 +370,12 @@ sym_rotate_for_scanout(struct pipe_screen *screen, struct pipe_resource *src, un
       the frame each shows. 90: the window server puts the frame's (x, y) at the display's (width - 1 - y, x), so the display's
       (X, Y) shows the frame's (Y, width - 1 - X): u = Y, v = 1 - X in [0, 1] coordinates. 270 is the opposite turn, 180 both
       axes. */
+   static const float uv0[8] = { 0, 0,  1, 0,  0, 1,  1, 1 };   /* (no turn: a scaled copy, the window is smaller than the display) */
    static const float uv90[8] = { 0, 1,  0, 0,  1, 1,  1, 0 };
    static const float uv180[8] = { 1, 1,  0, 1,  1, 0,  0, 0 };
    static const float uv270[8] = { 1, 0,  1, 1,  0, 0,  0, 1 };
    static const float xy[8] = { -1, -1,  1, -1,  -1, 1,  1, 1 };
-   const float *uv = degrees == 90 ? uv90 : degrees == 180 ? uv180 : uv270;
+   const float *uv = degrees == 90 ? uv90 : degrees == 180 ? uv180 : degrees == 270 ? uv270 : uv0;
    float verts[4][8];
    for (unsigned i = 0; i < 4; i++) {
       verts[i][0] = xy[2 * i];
@@ -442,7 +443,7 @@ sym_try_scanout(struct sym_egl_display *dpy, struct sym_buffer *buffer)
       return false;
    }
    struct pipe_resource *shown = back;
-   if (buffer->rotation) {
+   if (buffer->rotation || buffer->fullscreen > 1) {   /* (a turned screen, and/or a doubled one: the window is a quarter of the display) */
       shown = sym_rotate_for_scanout(dpy->disp->fscreen->screen, back, dw, dh, buffer->rotation);
       if (!shown)
          return false;
@@ -464,8 +465,9 @@ sym_try_scanout(struct sym_egl_display *dpy, struct sym_buffer *buffer)
       return false;
    }
    if (!buffer->scanout_on) {
-      char msg[120];
-      snprintf(msg, sizeof(msg), "[symgl] scan-out: this window is the display (GPU screen target, no window server)%s",
+      char msg[168];
+      snprintf(msg, sizeof(msg), "[symgl] scan-out: this window is the display%s (GPU screen target, no window server)%s",
+               buffer->fullscreen > 1 ? (buffer->fullscreen == 2 ? ", scaled 2x" : ", scaled up") : "",
                buffer->rotation == 90 ? ", turned 90" : buffer->rotation == 180 ? ", turned 180" :
                buffer->rotation == 270 ? ", turned 270" : "");
       symgl_log(msg);

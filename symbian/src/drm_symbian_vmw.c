@@ -92,6 +92,15 @@ vlog(const char *fmt, ...)
    symgl_log(buf);
 }
 
+/* a slow step of an object create / destroy (the first 40 over 2 ms), with where the time went: a = pool commit, b = the MOB define / destroy */
+static void
+slow_log(const char *what, uint32_t size, unsigned a_us, unsigned b_us)
+{
+   static int n;
+   if (a_us + b_us > 2000 && n++ < 40)
+      vlog("svga: slow %s: %u bytes, commit %u us, mob %u us", what, size, a_us, b_us);
+}
+
 /* ---- the pool's address space: first fit over a sorted list of free page ranges ---------------------------------------------- */
 
 static int
@@ -211,9 +220,17 @@ bo_create(uint32_t size, uint32_t *handle)
    }
    if (pool_alloc(pages, &first) != 0)
       return -ENOMEM;
+   const unsigned tc0 = symgl_now_us();
    int r = symvmw_pool_commit(V.v, first * PAGE, pages * PAGE);
+   const unsigned tc1 = symgl_now_us();
    if (r == 0)
       r = symvmw_mob_define(V.v, h, first * PAGE, size);
+   {
+      static int nlog;
+      if (SYM_DUS(tc0, tc1) > 2000 && nlog++ < 24)
+         vlog("svga: slow bo_create: %u bytes at page %u (%u pages), %d free ranges, %u buffers made so far", size, first, pages, V.nfree, V.creates);
+   }
+   slow_log("bo_create", size, SYM_DUS(tc0, tc1), SYM_DUS(tc1, symgl_now_us()));
    if (r != 0) {
       if (V.errors++ < 24)
          vlog("svga: buffer of %u bytes: commit / define MOB %u failed (%d)", size, h, r);
@@ -235,7 +252,9 @@ bo_unref(uint32_t handle)
    struct bo *b = bo_of(handle);
    if (!b || --b->refs > 0)
       return;
+   const unsigned tu0 = symgl_now_us();
    symvmw_mob_destroy(V.v, handle);
+   slow_log("bo_unref", b->size, 0, SYM_DUS(tu0, symgl_now_us()));
    pool_free(b->off / PAGE, (b->size + PAGE - 1) / PAGE);   /* (the pages stay committed: the next buffer here reuses them) */
    memset(b, 0, sizeof(*b));
 }
@@ -550,6 +569,7 @@ command(int fd, unsigned long cmd, void *data, unsigned long size)
    simple_mtx_unlock(&vmw_mtx);
    sym_vmw_prof_ioctls++;
    sym_vmw_prof_ioctl_us += dt;
+   slow_log("ioctl", (unsigned)cmd, dt, 0);
    if (cmd == DRM_VMW_ALLOC_DMABUF || cmd == DRM_VMW_GB_SURFACE_CREATE || cmd == DRM_VMW_GB_SURFACE_CREATE_EXT || cmd == DRM_VMW_UNREF_DMABUF || cmd == DRM_VMW_UNREF_SURFACE) {
       sym_vmw_prof_objs++;
       sym_vmw_prof_obj_us += dt;
