@@ -19,3 +19,14 @@ Everything here is under the MIT licence (LICENSE). The Symbian headers and libr
 Symbian Foundation's (EPL-1.0, or EPL-2.0 with GPL-2.0-or-later as a Secondary License where Phorepoc updated them) and come from the Phorepoc core repository.
 
 Our own file gen_gl_fronts.py (and the front sources it generates) is Apache-2.0 (LICENSES/Apache-2.0.txt). The Nokia-derived files in this repo are our updated versions, distributed under EPL-2.0 with GPL-2.0-or-later as a Secondary License (relicensed from EPL-1.0 under its section 7); see LICENSES/EPL-2.0.txt.
+
+Mesa (https://mesa3d.org), built into the image's OpenGL ES / EGL libraries from the release pinned in mesa.lock
+(26.2.4), is mostly under the MIT licence (LICENSES/MIT.txt); each file keeps its own copyright and SPDX line. The
+main copyright holders of the parts built here:
+
+- Core Mesa and the GL API: Copyright (C) 1999-2007 Brian Paul; Copyright (C) 2008 VMware, Inc. All Rights Reserved.
+- Gallium, softpipe and the utility code: Copyright 2007-2008 VMware, Inc. All rights reserved.
+- The lima driver (Mali-400): Copyright (c) 2017-2019 Lima Project.
+- The svga driver (VMware SVGA): Copyright (c) 2008-2024 Broadcom. All Rights Reserved.
+- The GLSL compiler and NIR: Copyright 2010-2014 Intel Corporation.
+- EGL: Copyright 2008 VMware, Inc.; Copyright 2009-2010 Chia-I Wu; Copyright 2010-2011 LunarG, Inc.
