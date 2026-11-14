@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright The Phorepoc Authors
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-or-later
 
 # recipes/prepare.sh -- run by the build before the components (pdk docs/layering.md), on the host: Mesa for ARM or x32
 # (build.sh in the mesa toolchain image) -> $PHOREPOC_BUILD/mesa-build/$PHOREPOC_ARCH/*.a (arm: softpipe + the lima Mali driver; x32: softpipe), which phgl links.

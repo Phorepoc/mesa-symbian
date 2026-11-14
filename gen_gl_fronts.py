@@ -133,7 +133,7 @@ def mesa_names(header: str) -> set[str]:
 
 
 FRONT_HEAD = """// Copyright The Phorepoc Authors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-or-later
 
 // {out} -- GENERATED (gen_gl_fronts.py) from {deffile} -- do not edit.
 // {dll}: the frozen Symbian ABI front over phgl.dll (Mesa). Every function resolves its backend entry once (ordinal
