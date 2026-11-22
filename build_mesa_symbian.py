@@ -181,6 +181,13 @@ PATCH = {
     },
     # EGL's per-thread state (current context, last error, bound API): the calling thread's slot
     "libegl_symbian": {
+        # OURS (Symbian): eglPresentImagePH (egl_symbian.c) -- a composer's EGLImage shown as the display, no copy
+        "eglapi.c": [("   if (strncmp(procname, \"egl\", 3) == 0) {\n",
+                      "   if (strcmp(procname, \"eglPresentImagePH\") == 0) {\n"
+                      "      extern EGLBoolean EGLAPIENTRY sym_egl_present_image(EGLDisplay, EGLImage);\n"
+                      "      RETURN_EGL_SUCCESS(NULL, (_EGLProc)sym_egl_present_image);\n"
+                      "   }\n"
+                      "   if (strncmp(procname, \"egl\", 3) == 0) {\n")],
         "eglcurrent.c": [("static __THREAD_INITIAL_EXEC _EGLThreadInfo _egl_TLS = {\n   .inited = false,\n};\n",
                           "#include \"symgl_native.h\"   /* OURS (Symbian): per-thread slot */\n"
                           "static _EGLThreadInfo sym_egl_oom;   /* out of memory: a shared fallback */\n"),

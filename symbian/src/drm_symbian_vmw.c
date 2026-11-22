@@ -49,6 +49,7 @@ struct surf {
    int used;
    uint32_t bo;              /* the backup buffer handle, 0 = none */
    int imported;             /* made by sym_vmw_import_addr: what GB_SURFACE_REF answers */
+   int shown;                /* an import that is the screen target (sym_vmw_present_import): never read back */
    int target;               /* an import the GPU draws into (READBACK after each command stream), else a source the CPU writes (UPDATE before) */
    uint32_t format, width, height, flags, backup;
 };
@@ -511,7 +512,7 @@ do_execbuf(const struct drm_vmw_execbuf_arg *a)
       cmd_run(&w, cid, "execbuf");   /* (an error in the stream is the stream's: vmwgfx does not fail the ioctl either) */
       cmd_begin(&w);               /* zero-copy imports the GPU draws into: their guest pages get the host's pixels */
       for (uint32_t i = 0; i < V.surf_high && w.bytes + 16 <= V.arena_bytes; i++)
-         if (V.surfs[i].imported && V.surfs[i].target) {
+         if (V.surfs[i].imported && V.surfs[i].target && !V.surfs[i].shown) {
             SVGA3dCmdReadbackGBSurface *c = cmd_add(&w, SVGA_3D_CMD_READBACK_GB_SURFACE, sizeof(*c));
             c->sid = V.info.surf_base + i;
             targets++;
@@ -1013,6 +1014,27 @@ sym_vmw_scanout_present(uint32_t sid, unsigned w, unsigned h)
       }
    }
    simple_mtx_unlock(&vmw_mtx);
+   return r;
+}
+
+/* a zero-copy import (the composer's target) as the display: the screen target over its GB surface. Not shown (another size, the display
+   driver took the screen target back): the frame is read back into the import's memory at once, so the caller can copy it as before */
+int
+sym_vmw_present_import(int prime_fd, unsigned w, unsigned h)
+{
+   const uint32_t sid = (uint32_t)prime_fd - PRIME_BASE;
+   if (!V.v || prime_fd < PRIME_BASE || sid < V.info.surf_base || sid >= V.info.surf_base + V.info.surf_count)
+      return -EINVAL;
+   struct surf *sf = &V.surfs[sid - V.info.surf_base];
+   sf->shown = 1;
+   const int r = sym_vmw_scanout_present(sid, w, h);
+   if (r != 0) {
+      static int n;
+      if (n++ < 8)
+         vlog("svga: import %u not shown (%d): read back", sid, r);
+      sf->shown = 0;
+      sym_vmw_surface_sync(prime_fd, 0);
+   }
    return r;
 }
 

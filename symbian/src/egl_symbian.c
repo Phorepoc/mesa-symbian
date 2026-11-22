@@ -724,6 +724,30 @@ static inline int sym_vmw_surface_sync(int p, int d) { (void)p; (void)d; return 
 static inline void sym_vmw_import_log(const char *fmt, ...) { (void)fmt; }
 #endif
 #define SYM_VMW_PRIME(p) ((p) >= 0x40000000)
+int sym_vmw_present_import(int prime_fd, unsigned w, unsigned h);
+
+/* eglPresentImagePH(dpy, image): an EGLImage the GPU just drew (a composer's target, imported zero-copy) becomes what the display shows --
+   svga: the image's GB surface is the screen target, one UPDATE_GB_SCREENTARGET, no READBACK into the framebuffer. EGL_FALSE = not shown
+   (another renderer, a size that is not the display's, the display driver took the screen target back): then the image's memory holds the
+   frame (drm_symbian_vmw.c reads it back) and the caller presents it the usual way */
+EGLBoolean EGLAPIENTRY
+sym_egl_present_image(EGLDisplay d, EGLImage image)
+{
+#ifdef GALLIUM_SVGA
+   _EGLDisplay *disp = _eglLookupDisplay(d);
+   _EGLImage *i = disp ? _eglLookupImage(image, disp) : NULL;
+   if (!i)
+      return EGL_FALSE;
+   struct sym_egl_image *img = (struct sym_egl_image *)i;
+   if (!SYM_VMW_PRIME(img->prime_fd) || !img->tex)
+      return EGL_FALSE;
+   return sym_vmw_present_import(img->prime_fd, img->tex->width0, img->tex->height0) == 0 ? EGL_TRUE : EGL_FALSE;
+#else
+   (void)d; (void)image;
+   return EGL_FALSE;
+#endif
+}
+
 static void
 sym_unimport(int fd, int prime)
 {
