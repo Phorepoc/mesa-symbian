@@ -1301,6 +1301,11 @@ sym_initialize(_EGLDisplay *disp)
       dpy->disp->fscreen->get_egl_image = sym_get_egl_image;
       dpy->disp->fscreen->validate_egl_image = sym_validate_egl_image;
       sym_the_disp = disp;
+   } else if (dpy->vmw_fd >= 0) {  /* svga: memory images (EGL_SYMBIAN_MEMORY_IMAGE_PH) are zero-copy imports, drm_symbian_vmw.c */
+      disp->Extensions.KHR_image_base = EGL_TRUE;
+      dpy->disp->fscreen->get_egl_image = sym_get_egl_image;
+      dpy->disp->fscreen->validate_egl_image = sym_validate_egl_image;
+      sym_the_disp = disp;
    }
 
    sym_add_config(disp, 1, 0, 0);    /* XRGB8888 + D24S8: the composition-friendly default */
