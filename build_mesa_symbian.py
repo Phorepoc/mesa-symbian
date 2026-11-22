@@ -357,6 +357,16 @@ PATCH["libsvgadrm"] = {
 """)],
 }
 
+# the svga import's refusals (zero-copy memory images, egl_symbian.c): stderr and debug_printf reach nothing here -> Mesa's log (RDebug)
+PATCH["libsvgadrm"]["vmw_screen_dri.c"] = [
+    ("#include <stdio.h>\n",
+     "#include <stdio.h>\n#include \"util/log.h\"\n"
+     "#define fprintf(f, ...) mesa_loge(__VA_ARGS__)   /* OURS (Symbian): stderr is nowhere */\n")]
+PATCH.setdefault("libsvga", {})["svga_format.c"] = [
+    ("#include \"util/u_debug.h\"\n", "#include \"util/u_debug.h\"\n#include \"util/log.h\"\n"),
+    ("   if (verbose) {\n      debug_printf(\"Incompatible imported surface format.\\n\");\n      debug_printf(",
+     "   if (verbose) {   /* OURS (Symbian): to Mesa's log */\n      mesa_loge(\"Incompatible imported surface format.\");\n      mesa_loge(")]
+
 if ARCH == "x32":
     # x86 only: gallium's vertex translator JIT-compiles x86 code at run time (translate_sse.c over rtasm's executable
     # memory, rtasm_execmem.c: dropped above). A Symbian process has no memory it can both write and run, so the
