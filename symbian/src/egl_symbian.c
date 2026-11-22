@@ -712,9 +712,17 @@ static const EGLint sym_mem_attr_tag[] = {EGL_NONE};
 static int sym_range_add(int prime, uint32_t off, uint32_t size);
 
 /* svga (drm_symbian_vmw.c): the zero-copy import of memory images -- a MOB over the chunk's own pages + a GB surface on it */
+#ifdef GALLIUM_SVGA
 int sym_vmw_import_image(const void *addr, uint32_t width, uint32_t height, uint32_t drm_fourcc, int render_target, int is_target);
 void sym_vmw_unimport(int prime_fd);
 int sym_vmw_surface_sync(int prime_fd, int to_device);
+void sym_vmw_import_log(const char *fmt, ...);
+#else   /* a build without the svga driver (ARM): no svga imports */
+static inline int sym_vmw_import_image(const void *a, uint32_t w, uint32_t h, uint32_t f, int r, int t) { (void)a; (void)w; (void)h; (void)f; (void)r; (void)t; return -1; }
+static inline void sym_vmw_unimport(int p) { (void)p; }
+static inline int sym_vmw_surface_sync(int p, int d) { (void)p; (void)d; return -1; }
+static inline void sym_vmw_import_log(const char *fmt, ...) { (void)fmt; }
+#endif
 #define SYM_VMW_PRIME(p) ((p) >= 0x40000000)
 static void
 sym_unimport(int fd, int prime)
@@ -734,6 +742,8 @@ sym_create_image(_EGLDisplay *disp, _EGLContext *ctx, EGLenum target, EGLClientB
       return sym_create_sgimage_image(disp, buffer, attr_list);
    if (target == EGL_SYMBIAN_MEMORY_IMAGE_PH && dpy && (dpy->fd >= 0 || dpy->vmw_fd >= 0))
       return sym_create_sgimage_image(disp, buffer, sym_mem_attr_tag);
+   if (target == EGL_SYMBIAN_MEMORY_IMAGE_PH)
+      sym_vmw_import_log("memory image refused: display %p, Mali fd %d, svga fd %d", (void *)dpy, dpy ? dpy->fd : -9, dpy ? dpy->vmw_fd : -9);
    if (target != EGL_LINUX_DMA_BUF_EXT || !dpy || dpy->fd < 0) {
       _eglError(EGL_BAD_PARAMETER,
                 "eglCreateImageKHR: only EGL_LINUX_DMA_BUF_EXT (a chunk handle) or EGL_NATIVE_PIXMAP_KHR (RSgImage*) on the Mali");
@@ -1018,8 +1028,11 @@ sym_sg_resource(struct sym_egl_display *dpy, const struct sym_sg_layout *l, unsi
    if (dpy->fd < 0) {
       /* svga: the MOB is the image itself, so it must start the import and have rows of exactly width * 4 bytes (a GB surface has no
          pitch of its own); anything else is refused, there is no copy */
-      if (l->res_off != 0 || l->sg.stride != l->sg.width * 4)
+      if (l->res_off != 0 || l->sg.stride != l->sg.width * 4) {
+         sym_vmw_import_log("%p %ux%u stride %u: refused (offset %u in its page, or rows not width * 4)", l->sg.base, l->sg.width, l->sg.height,
+                            l->sg.stride, l->res_off);
          return NULL;
+      }
       prime = sym_vmw_import_image(l->imp_addr, l->sg.width, l->sg.height, l->drm_fourcc, (bind & PIPE_BIND_RENDER_TARGET) != 0,
                                    (l->sg.usage & 1) != 0);
    } else
@@ -1045,6 +1058,9 @@ sym_sg_resource(struct sym_egl_display *dpy, const struct sym_sg_layout *l, unsi
    wh.modifier = DRM_FORMAT_MOD_LINEAR;
    wh.format = l->drm_fourcc;
    struct pipe_resource *res = screen->resource_from_handle(screen, &templat, &wh, PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE);
+   if (!res && dpy->fd < 0)
+      sym_vmw_import_log("%p %ux%u: resource_from_handle refused (pipe format %d, bind %x; svga_texture_from_handle: surface ref or"
+                         " svga_format_is_shareable)", l->sg.base, l->sg.width, l->sg.height, (int)l->pf, templat.bind);
    if (!res) {
       sym_unimport(dpy->fd, prime);
       return NULL;
@@ -1063,6 +1079,8 @@ sym_create_sgimage_image(_EGLDisplay *disp, EGLClientBuffer rsgimage, const EGLi
    struct sym_sg_layout l;
    const bool mem = attr_list == sym_mem_attr_tag;
    if (!rsgimage || !(mem ? sym_mem_layout_get((const symgl_sgimage *)rsgimage, &l) : sym_sg_layout_get(rsgimage, &l))) {
+      if (dpy->fd < 0)
+         sym_vmw_import_log("memory image %p: no layout (format or stride & 7)", rsgimage);
       _eglError(EGL_BAD_PARAMETER, "eglCreateImageKHR: not an RSgImage in system memory (or a format we cannot use)");
       return NULL;
    }

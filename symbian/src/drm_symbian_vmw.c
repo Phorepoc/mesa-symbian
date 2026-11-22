@@ -200,6 +200,21 @@ cmd_run(const struct cmdw *c, uint32_t cid, const char *what)
    return 0;
 }
 
+/* the zero-copy import's refusals (egl_symbian.c too): the first 32, whatever else went wrong before */
+void
+sym_vmw_import_log(const char *fmt, ...)
+{
+   static int n;
+   if (n++ >= 32)
+      return;
+   char buf[256];
+   va_list ap;
+   va_start(ap, fmt);
+   vsnprintf(buf, sizeof(buf), fmt, ap);
+   va_end(ap);
+   vlog("import: %s", buf);
+}
+
 /* ---- buffer objects ----------------------------------------------------------------------------------------------------------- */
 
 static struct bo *
@@ -712,8 +727,10 @@ sym_vmw_drmPrimeFDToHandle(int fd, int prime_fd, uint32_t *handle)
 int
 sym_vmw_import_addr(const void *addr, uint32_t width, uint32_t height, uint32_t svga_format, uint32_t flags)
 {
-   if (!V.v || ((uintptr_t)addr & (PAGE - 1)) || !width || !height)
+   if (!V.v || ((uintptr_t)addr & (PAGE - 1)) || !width || !height) {
+      sym_vmw_import_log("%p %ux%u refused (device %d, not page aligned or empty)", addr, width, height, V.v != NULL);
       return -1;
+   }
    simple_mtx_lock(&vmw_mtx);
    const uint32_t size = width * 4 * height;
    uint32_t h = 0;
@@ -724,8 +741,7 @@ sym_vmw_import_addr(const void *addr, uint32_t width, uint32_t height, uint32_t 
       }
    int r = h ? symvmw_mob_define_addr(V.v, h, addr, (size + PAGE - 1) & ~(PAGE - 1)) : -4;
    if (r != 0) {
-      if (V.errors++ < 24)
-         vlog("svga: import of %p (%ux%u): MOB %u failed (%d)", addr, width, height, h, r);
+      sym_vmw_import_log("%p (%ux%u): MOB %u over the chunk failed (%d)", addr, width, height, h, r);
       simple_mtx_unlock(&vmw_mtx);
       return -1;
    }
@@ -749,7 +765,8 @@ sym_vmw_import_addr(const void *addr, uint32_t width, uint32_t height, uint32_t 
    if (r != 0 || rep.backup_size > b->size) {
       if (r == 0)
          do_unref_surface(rep.handle);
-      vlog("svga: import of %p (%ux%u format %u): surface failed (%d, backup %u)", addr, width, height, svga_format, r, rep.backup_size);
+      sym_vmw_import_log("%p (%ux%u format %u flags %x): GB surface failed (%d, backup %u of %u)", addr, width, height, svga_format, flags, r,
+                         rep.backup_size, b->size);
       bo_unref(h);
       simple_mtx_unlock(&vmw_mtx);
       return -1;
@@ -774,12 +791,15 @@ sym_vmw_import_image(const void *addr, uint32_t width, uint32_t height, uint32_t
       fmt = SVGA3D_B8G8R8A8_UNORM;
    else if (drm_fourcc == 0x34325258 /* XR24 */)
       fmt = SVGA3D_B8G8R8X8_UNORM;
-   else
+   else {
+      sym_vmw_import_log("%p: fourcc %08x not importable", addr, drm_fourcc);
       return -1;
+   }
    uint32_t flags = SVGA3D_SURFACE_HINT_TEXTURE | SVGA3D_SURFACE_BIND_SHADER_RESOURCE;
    if (render_target)
       flags |= SVGA3D_SURFACE_HINT_RENDERTARGET | SVGA3D_SURFACE_BIND_RENDER_TARGET;
    const int prime = sym_vmw_import_addr(addr, width, height, fmt, flags);
+   sym_vmw_import_log("%p %ux%u svga format %u rt %d target %d -> %d", addr, width, height, fmt, render_target, is_target, prime);
    if (prime >= PRIME_BASE) {
       V.surfs[prime - PRIME_BASE - V.info.surf_base].target = is_target;
       V.import_stale = 1;
