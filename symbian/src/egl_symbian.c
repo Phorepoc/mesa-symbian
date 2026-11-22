@@ -734,7 +734,8 @@ EGLBoolean EGLAPIENTRY
 sym_egl_present_image(EGLDisplay d, EGLImage image)
 {
 #ifdef GALLIUM_SVGA
-   _EGLDisplay *disp = _eglLookupDisplay(d);
+   (void)d;   /* (one display: the one the composer imported its images on; _eglLookupDisplay is eglapi.c's own) */
+   _EGLDisplay *disp = sym_the_disp;
    _EGLImage *i = disp ? _eglLookupImage(image, disp) : NULL;
    if (!i)
       return EGL_FALSE;
