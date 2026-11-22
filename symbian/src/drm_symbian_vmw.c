@@ -758,8 +758,7 @@ sym_vmw_import_addr(const void *addr, uint32_t width, uint32_t height, uint32_t 
    rq.base_size.width = width;
    rq.base_size.height = height;
    rq.base_size.depth = 1;
-   rq.array_size = 1;          /* a DX (vgpu10) surface: one layer, one sample, as Mesa's own vgpu10 surfaces */
-   rq.multisample_count = 1;
+   rq.array_size = 1;          /* a DX (vgpu10) surface: one layer, as Mesa's own vgpu10 surfaces */
    rq.buffer_handle = h;
    struct drm_vmw_gb_surface_create_rep rep;
    memset(&rep, 0, sizeof(rep));
