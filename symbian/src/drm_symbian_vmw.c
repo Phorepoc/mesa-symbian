@@ -802,6 +802,8 @@ sym_vmw_import_image(const void *addr, uint32_t width, uint32_t height, uint32_t
    uint32_t flags = SVGA3D_SURFACE_HINT_TEXTURE | SVGA3D_SURFACE_BIND_SHADER_RESOURCE;
    if (render_target)
       flags |= SVGA3D_SURFACE_HINT_RENDERTARGET | SVGA3D_SURFACE_BIND_RENDER_TARGET;
+   if (render_target && is_target)
+      flags |= SVGA3D_SURFACE_SCREENTARGET;   /* the composer's target can be the screen target (sym_vmw_present_import), as vmwgfx's scan-out surfaces */
    const int prime = sym_vmw_import_addr(addr, width, height, fmt, flags);
    sym_vmw_import_log("%p %ux%u svga format %u rt %d target %d -> %d", addr, width, height, fmt, render_target, is_target, prime);
    if (prime >= PRIME_BASE) {
