@@ -42,12 +42,21 @@
 struct bo {
    uint32_t off, size;       /* pool offset (page aligned), bytes asked for (0 = free handle) */
    int refs;                 /* the user's handle + each surface bound to it */
+   void *cpu;                /* an import (sym_vmw_import_addr): the memory of this process the MOB is over; NULL = a pool buffer */
 };
 
 struct surf {
    int used;
    uint32_t bo;              /* the backup buffer handle, 0 = none */
+   int imported;             /* made by sym_vmw_import_addr: what GB_SURFACE_REF answers */
+   int target;               /* an import the GPU draws into (READBACK after each command stream), else a source the CPU writes (UPDATE before) */
+   uint32_t format, width, height, flags, backup;
 };
+
+/* mmap offset of an import's buffer (outside the pool's offsets): the import's own address is returned */
+#define IMPORT_MAP ((uint64_t)1 << 40)
+/* "prime fds" of imported surfaces: PRIME_BASE + surface id */
+#define PRIME_BASE 0x40000000
 
 struct ctx {
    int used, dx;
@@ -73,6 +82,7 @@ static struct {
    uint32_t seqno;
    uint32_t surf_high, ctx_high;
    uint32_t submits, errors, creates;
+   int import_stale;         /* the CPU may have written imported sources since the last UPDATE */
 } V;
 
 static simple_mtx_t vmw_mtx = SIMPLE_MTX_INITIALIZER;
@@ -253,8 +263,12 @@ bo_unref(uint32_t handle)
    if (!b || --b->refs > 0)
       return;
    const unsigned tu0 = symgl_now_us();
-   symvmw_mob_destroy(V.v, handle);
+   symvmw_mob_destroy(V.v, handle);   /* (an import: the kernel driver unpins the pages and lets go of the chunk) */
    slow_log("bo_unref", b->size, 0, SYM_DUS(tu0, symgl_now_us()));
+   if (b->cpu) {
+      memset(b, 0, sizeof(*b));
+      return;
+   }
    pool_free(b->off / PAGE, (b->size + PAGE - 1) / PAGE);   /* (the pages stay committed: the next buffer here reuses them) */
    memset(b, 0, sizeof(*b));
 }
@@ -460,6 +474,19 @@ do_execbuf(const struct drm_vmw_execbuf_arg *a)
    }
    struct drm_vmw_fence_rep *rep = (struct drm_vmw_fence_rep *)(uintptr_t)a->fence_rep;
    uint32_t seq = ++V.seqno;
+   int targets = 0;
+   if (a->command_size && V.import_stale) {   /* zero-copy imports: the host re-reads what the CPU wrote into the sources */
+      struct cmdw w;
+      cmd_begin(&w);
+      for (uint32_t i = 0; i < V.surf_high && w.bytes + 16 <= V.arena_bytes; i++)
+         if (V.surfs[i].imported && !V.surfs[i].target) {
+            SVGA3dCmdUpdateGBSurface *c = cmd_add(&w, SVGA_3D_CMD_UPDATE_GB_SURFACE, sizeof(*c));
+            c->sid = V.info.surf_base + i;
+         }
+      if (w.bytes)
+         cmd_run(&w, SVGA3D_INVALID_ID, "import update");
+      V.import_stale = 0;
+   }
    if (a->command_size) {
       struct cmdw w;
       cmd_begin(&w);
@@ -467,6 +494,17 @@ do_execbuf(const struct drm_vmw_execbuf_arg *a)
       w.bytes = a->command_size;
       const uint32_t cid = a->version > 1 ? a->context_handle : SVGA3D_INVALID_ID;
       cmd_run(&w, cid, "execbuf");   /* (an error in the stream is the stream's: vmwgfx does not fail the ioctl either) */
+      cmd_begin(&w);               /* zero-copy imports the GPU draws into: their guest pages get the host's pixels */
+      for (uint32_t i = 0; i < V.surf_high && w.bytes + 16 <= V.arena_bytes; i++)
+         if (V.surfs[i].imported && V.surfs[i].target) {
+            SVGA3dCmdReadbackGBSurface *c = cmd_add(&w, SVGA_3D_CMD_READBACK_GB_SURFACE, sizeof(*c));
+            c->sid = V.info.surf_base + i;
+            targets++;
+         }
+      if (targets) {
+         cmd_run(&w, SVGA3D_INVALID_ID, "import readback");
+         V.import_stale = 1;   /* (a frame ended: the next one's sources are new) */
+      }
    }
    if (rep) {
       rep->handle = seq;
@@ -531,6 +569,40 @@ dispatch(unsigned long cmd, void *data, unsigned long size)
       struct drm_vmw_gb_surface_create_ext_req rq = a->req;
       return do_gb_surface_create(&rq.base, rq.svga3d_flags_upper_32_bits, rq.multisample_pattern, rq.quality_level,
                                   rq.buffer_byte_stride, &a->rep);
+   }
+   case DRM_VMW_GB_SURFACE_REF:
+   case DRM_VMW_GB_SURFACE_REF_EXT: {
+      const uint32_t sid = ((struct drm_vmw_surface_arg *)data)->sid;
+      if (sid < V.info.surf_base || sid >= V.info.surf_base + V.info.surf_count || !V.surfs[sid - V.info.surf_base].imported)
+         return -EINVAL;   /* (only imports are shared by handle) */
+      const struct surf *sf = &V.surfs[sid - V.info.surf_base];
+      struct drm_vmw_gb_surface_create_req *creq;
+      struct drm_vmw_gb_surface_create_rep *crep;
+      if (cmd == DRM_VMW_GB_SURFACE_REF_EXT) {
+         union drm_vmw_gb_surface_reference_ext_arg *a = data;
+         memset(&a->rep, 0, sizeof(a->rep));
+         creq = &a->rep.creq.base;
+         crep = &a->rep.crep;
+      } else {
+         union drm_vmw_gb_surface_reference_arg *a = data;
+         memset(&a->rep, 0, sizeof(a->rep));
+         creq = &a->rep.creq;
+         crep = &a->rep.crep;
+      }
+      creq->svga3d_flags = sf->flags;
+      creq->format = sf->format;
+      creq->mip_levels = 1;
+      creq->base_size.width = sf->width;
+      creq->base_size.height = sf->height;
+      creq->base_size.depth = 1;
+      creq->buffer_handle = sf->bo;
+      crep->handle = sid;
+      crep->backup_size = sf->backup;
+      crep->buffer_handle = sf->bo;
+      crep->buffer_size = sf->backup;
+      crep->buffer_map_handle = IMPORT_MAP | sf->bo;
+      bo_of(sf->bo)->refs++;   /* the region Mesa makes of it is released as a buffer (UNREF_DMABUF) */
+      return 0;
    }
    case DRM_VMW_UNREF_SURFACE:
       return do_unref_surface(((struct drm_vmw_surface_arg *)data)->sid);
@@ -626,14 +698,146 @@ sym_vmw_drmPrimeHandleToFD(int fd, uint32_t handle, uint32_t flags, int *prime_f
 int
 sym_vmw_drmPrimeFDToHandle(int fd, int prime_fd, uint32_t *handle)
 {
-   (void)fd; (void)prime_fd; (void)handle;
-   return -ENOSYS;
+   (void)fd;
+   const uint32_t sid = (uint32_t)prime_fd - PRIME_BASE;
+   if (prime_fd < PRIME_BASE || sid < V.info.surf_base || sid >= V.info.surf_base + V.info.surf_count || !V.surfs[sid - V.info.surf_base].imported)
+      return -EINVAL;
+   *handle = sid;
+   return 0;
+}
+
+/* Zero-copy import (the vmwgfx prime import): memory of this process in a shared chunk (page aligned, rows of exactly width * 4
+   bytes) becomes a MOB over the chunk's own pages and a GB surface backed by it. Returns a "prime fd" for resource_from_handle, or -1.
+   svga_format: SVGA3dSurfaceFormat; flags: SVGA3D_SURFACE_* (bind flags) */
+int
+sym_vmw_import_addr(const void *addr, uint32_t width, uint32_t height, uint32_t svga_format, uint32_t flags)
+{
+   if (!V.v || ((uintptr_t)addr & (PAGE - 1)) || !width || !height)
+      return -1;
+   simple_mtx_lock(&vmw_mtx);
+   const uint32_t size = width * 4 * height;
+   uint32_t h = 0;
+   for (uint32_t i = 0; i < V.info.mob_count; i++)
+      if (!V.bos[i].size) {
+         h = V.info.mob_base + i;
+         break;
+      }
+   int r = h ? symvmw_mob_define_addr(V.v, h, addr, (size + PAGE - 1) & ~(PAGE - 1)) : -4;
+   if (r != 0) {
+      if (V.errors++ < 24)
+         vlog("svga: import of %p (%ux%u): MOB %u failed (%d)", addr, width, height, h, r);
+      simple_mtx_unlock(&vmw_mtx);
+      return -1;
+   }
+   struct bo *b = &V.bos[h - V.info.mob_base];
+   b->off = 0;
+   b->size = size;
+   b->refs = 1;   /* the import's own (sym_vmw_unimport) */
+   b->cpu = (void *)addr;
+   struct drm_vmw_gb_surface_create_req rq;
+   memset(&rq, 0, sizeof(rq));
+   rq.svga3d_flags = flags;
+   rq.format = svga_format;
+   rq.mip_levels = 1;
+   rq.base_size.width = width;
+   rq.base_size.height = height;
+   rq.base_size.depth = 1;
+   rq.buffer_handle = h;
+   struct drm_vmw_gb_surface_create_rep rep;
+   memset(&rep, 0, sizeof(rep));
+   r = do_gb_surface_create(&rq, 0, 0, 0, 0, &rep);
+   if (r != 0 || rep.backup_size > b->size) {
+      if (r == 0)
+         do_unref_surface(rep.handle);
+      vlog("svga: import of %p (%ux%u format %u): surface failed (%d, backup %u)", addr, width, height, svga_format, r, rep.backup_size);
+      bo_unref(h);
+      simple_mtx_unlock(&vmw_mtx);
+      return -1;
+   }
+   struct surf *sf = &V.surfs[rep.handle - V.info.surf_base];
+   sf->imported = 1;
+   sf->format = svga_format;
+   sf->width = width;
+   sf->height = height;
+   sf->flags = flags;
+   sf->backup = rep.backup_size;
+   simple_mtx_unlock(&vmw_mtx);
+   return PRIME_BASE + (int)rep.handle;
+}
+
+/* egl_symbian.c's memory images: DRM fourcc ARGB8888 / XRGB8888 (B8G8R8A8 / B8G8R8X8 in memory) */
+int
+sym_vmw_import_image(const void *addr, uint32_t width, uint32_t height, uint32_t drm_fourcc, int render_target, int is_target)
+{
+   uint32_t fmt;
+   if (drm_fourcc == 0x34325241 /* AR24 */)
+      fmt = SVGA3D_B8G8R8A8_UNORM;
+   else if (drm_fourcc == 0x34325258 /* XR24 */)
+      fmt = SVGA3D_B8G8R8X8_UNORM;
+   else
+      return -1;
+   uint32_t flags = SVGA3D_SURFACE_HINT_TEXTURE | SVGA3D_SURFACE_BIND_SHADER_RESOURCE;
+   if (render_target)
+      flags |= SVGA3D_SURFACE_HINT_RENDERTARGET | SVGA3D_SURFACE_BIND_RENDER_TARGET;
+   const int prime = sym_vmw_import_addr(addr, width, height, fmt, flags);
+   if (prime >= PRIME_BASE) {
+      V.surfs[prime - PRIME_BASE - V.info.surf_base].target = is_target;
+      V.import_stale = 1;
+   }
+   return prime;
+}
+
+/* the import's own reference: the MOB goes when the surface (Mesa's texture) has gone as well */
+void
+sym_vmw_unimport(int prime_fd)
+{
+   const uint32_t sid = (uint32_t)prime_fd - PRIME_BASE;
+   simple_mtx_lock(&vmw_mtx);
+   if (prime_fd >= PRIME_BASE && sid >= V.info.surf_base && sid < V.info.surf_base + V.info.surf_count) {
+      struct surf *sf = &V.surfs[sid - V.info.surf_base];
+      if (sf->imported && sf->bo) {
+         const uint32_t bo = sf->bo;
+         sf->imported = 0;   /* (the surface itself goes with Mesa's UNREF_SURFACE) */
+         bo_unref(bo);
+      }
+   }
+   simple_mtx_unlock(&vmw_mtx);
+}
+
+/* keep the host's copy of an imported surface and its guest pages in step: to_device = 1 after the CPU wrote them (UPDATE: the host
+   re-reads the MOB), 0 after the GPU drew into it (READBACK: the MOB gets the host's pixels; the command buffer has completed on
+   return) */
+int
+sym_vmw_surface_sync(int prime_fd, int to_device)
+{
+   const uint32_t sid = (uint32_t)prime_fd - PRIME_BASE;
+   if (prime_fd < PRIME_BASE)
+      return -EINVAL;
+   simple_mtx_lock(&vmw_mtx);
+   struct cmdw w;
+   cmd_begin(&w);
+   if (to_device) {
+      SVGA3dCmdUpdateGBSurface *c = cmd_add(&w, SVGA_3D_CMD_UPDATE_GB_SURFACE, sizeof(*c));
+      c->sid = sid;
+   } else {
+      SVGA3dCmdReadbackGBSurface *c = cmd_add(&w, SVGA_3D_CMD_READBACK_GB_SURFACE, sizeof(*c));
+      c->sid = sid;
+   }
+   const int r = cmd_run(&w, SVGA3D_INVALID_ID, to_device ? "import update" : "import readback");
+   simple_mtx_unlock(&vmw_mtx);
+   return r;
 }
 
 void *
 sym_vmw_mmap(int fd, uint64_t offset, size_t size)
 {
-   if (fd != FD_VMW || !V.v || offset + size > V.info.pool_bytes)
+   if (fd != FD_VMW || !V.v)
+      return (void *)-1;
+   if (offset & IMPORT_MAP) {   /* an import's buffer: its own memory */
+      const struct bo *b = bo_of((uint32_t)(offset & 0xffffffffu));
+      return b && b->cpu ? b->cpu : (void *)-1;
+   }
+   if (offset + size > V.info.pool_bytes)
       return (void *)-1;
    return (uint8_t *)V.info.pool_base + offset;
 }

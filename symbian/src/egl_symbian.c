@@ -711,6 +711,20 @@ static _EGLImage *sym_create_sgimage_image(_EGLDisplay *disp, EGLClientBuffer rs
 static const EGLint sym_mem_attr_tag[] = {EGL_NONE};
 static int sym_range_add(int prime, uint32_t off, uint32_t size);
 
+/* svga (drm_symbian_vmw.c): the zero-copy import of memory images -- a MOB over the chunk's own pages + a GB surface on it */
+int sym_vmw_import_image(const void *addr, uint32_t width, uint32_t height, uint32_t drm_fourcc, int render_target, int is_target);
+void sym_vmw_unimport(int prime_fd);
+int sym_vmw_surface_sync(int prime_fd, int to_device);
+#define SYM_VMW_PRIME(p) ((p) >= 0x40000000)
+static void
+sym_unimport(int fd, int prime)
+{
+   if (SYM_VMW_PRIME(prime))
+      sym_vmw_unimport(prime);
+   else
+      sym_drm_unimport(fd, prime);
+}
+
 static _EGLImage *
 sym_create_image(_EGLDisplay *disp, _EGLContext *ctx, EGLenum target, EGLClientBuffer buffer, const EGLint *attr_list)
 {
@@ -718,7 +732,7 @@ sym_create_image(_EGLDisplay *disp, _EGLContext *ctx, EGLenum target, EGLClientB
    (void)ctx;
    if (target == EGL_NATIVE_PIXMAP_KHR && dpy && dpy->fd >= 0)
       return sym_create_sgimage_image(disp, buffer, attr_list);
-   if (target == EGL_SYMBIAN_MEMORY_IMAGE_PH && dpy && dpy->fd >= 0)
+   if (target == EGL_SYMBIAN_MEMORY_IMAGE_PH && dpy && (dpy->fd >= 0 || dpy->vmw_fd >= 0))
       return sym_create_sgimage_image(disp, buffer, sym_mem_attr_tag);
    if (target != EGL_LINUX_DMA_BUF_EXT || !dpy || dpy->fd < 0) {
       _eglError(EGL_BAD_PARAMETER,
@@ -814,7 +828,7 @@ sym_destroy_image(_EGLDisplay *disp, _EGLImage *image)
    (void)disp;
    sym_range_remove(img->range);
    pipe_resource_reference(&img->tex, NULL);    /* both planes */
-   sym_drm_unimport(img->fd, img->prime_fd);
+   sym_unimport(img->fd, img->prime_fd);
    free(img);
    return EGL_TRUE;
 }
@@ -915,6 +929,13 @@ sym_ranges_sync(int fd, int before, uint32_t imports)
       if (bit >= 0 && !(imports & (1u << bit)))
          continue;
       const int role = sym_ranges[i].role;
+      if (SYM_VMW_PRIME(sym_ranges[i].prime)) {
+         /* svga: the host keeps its own copy of a GB surface -- before GPU work it re-reads what the CPU wrote (UPDATE, sources
+            and both), after it the guest pages get what the GPU drew (READBACK, targets and both) */
+         if (before ? role != SYM_RANGE_TARGET : role != SYM_RANGE_SOURCE)
+            sym_vmw_surface_sync(sym_ranges[i].prime, before);
+         continue;
+      }
       int op;
       if (before)
          op = role == SYM_RANGE_SOURCE ? 0 : 1;
@@ -993,7 +1014,16 @@ sym_sg_layout_fill(struct sym_sg_layout *l)
 static struct pipe_resource *
 sym_sg_resource(struct sym_egl_display *dpy, const struct sym_sg_layout *l, unsigned bind, int *prime_out)
 {
-   const int prime = sym_drm_import_addr(dpy->fd, l->imp_addr, l->imp_size);
+   int prime;
+   if (dpy->fd < 0) {
+      /* svga: the MOB is the image itself, so it must start the import and have rows of exactly width * 4 bytes (a GB surface has no
+         pitch of its own); anything else is refused, there is no copy */
+      if (l->res_off != 0 || l->sg.stride != l->sg.width * 4)
+         return NULL;
+      prime = sym_vmw_import_image(l->imp_addr, l->sg.width, l->sg.height, l->drm_fourcc, (bind & PIPE_BIND_RENDER_TARGET) != 0,
+                                   (l->sg.usage & 1) != 0);
+   } else
+      prime = sym_drm_import_addr(dpy->fd, l->imp_addr, l->imp_size);
    if (prime < 0)
       return NULL;
    struct pipe_screen *screen = dpy->disp->fscreen->screen;
@@ -1016,7 +1046,7 @@ sym_sg_resource(struct sym_egl_display *dpy, const struct sym_sg_layout *l, unsi
    wh.format = l->drm_fourcc;
    struct pipe_resource *res = screen->resource_from_handle(screen, &templat, &wh, PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE);
    if (!res) {
-      sym_drm_unimport(dpy->fd, prime);
+      sym_unimport(dpy->fd, prime);
       return NULL;
    }
    *prime_out = prime;
@@ -1047,7 +1077,7 @@ sym_create_sgimage_image(_EGLDisplay *disp, EGLClientBuffer rsgimage, const EGLi
    struct sym_egl_image *img = calloc(1, sizeof(*img));
    if (!img) {
       pipe_resource_reference(&res, NULL);
-      sym_drm_unimport(dpy->fd, prime);
+      sym_unimport(dpy->fd, prime);
       _eglError(EGL_BAD_ALLOC, "eglCreateImageKHR");
       return NULL;
    }
@@ -1062,7 +1092,10 @@ sym_create_sgimage_image(_EGLDisplay *disp, EGLClientBuffer rsgimage, const EGLi
    const int role = !mem ? SYM_RANGE_BOTH : (l.sg.usage & 1) ? SYM_RANGE_TARGET : SYM_RANGE_SOURCE;
    img->range = sym_range_add_role(prime, l.res_off, l.sg.stride * l.sg.height, role);
    /* the CPU filled it: its dirty lines go to memory before the GPU samples it */
-   sym_drm_cache_sync(dpy->fd, prime, l.res_off, l.sg.stride * l.sg.height, role == SYM_RANGE_SOURCE ? 0 : 1);
+   if (SYM_VMW_PRIME(prime))
+      sym_vmw_surface_sync(prime, 1);   /* the host reads the pages the CPU filled */
+   else
+      sym_drm_cache_sync(dpy->fd, prime, l.res_off, l.sg.stride * l.sg.height, role == SYM_RANGE_SOURCE ? 0 : 1);
    return &img->base;
 }
 
@@ -1177,6 +1210,8 @@ sym_wait_client(_EGLDisplay *disp, _EGLContext *c)
    if (!ctx || !ctx->st)
       return EGL_TRUE;
    sym_finish_context(dpy, ctx->st);   /* the cache maintenance rides on the jobs (sym_sync_hook) */
+   if (dpy->fd < 0 && dpy->vmw_fd >= 0)
+      sym_ranges_sync(-1, 0, ~0u);       /* svga memory images: READBACK of what the GPU drew */
    if (c->DrawSurface && sym_egl_surface(c->DrawSurface)->gpu_pixmap)
       sym_pixmap_download(sym_egl_surface(c->DrawSurface), ctx->st);
    return EGL_TRUE;
@@ -1190,8 +1225,8 @@ sym_wait_native(EGLint engine)
       svga pixmap upload below never ran (glpixmaptest step 3) */
    _EGLContext *cur = _eglGetCurrentContext();
    struct sym_egl_display *dpy = cur ? sym_egl_display(cur->Resource.Display) : NULL;
-   if (dpy && dpy->fd >= 0)
-      sym_ranges_sync(dpy->fd, 1, ~0u);   /* the CPU wrote them, the GPU will read/write (sources: clean only) */
+   if (dpy && (dpy->fd >= 0 || dpy->vmw_fd >= 0))
+      sym_ranges_sync(dpy->fd, 1, ~0u);   /* the CPU wrote them, the GPU will read/write (sources: clean only; svga: UPDATE) */
    if (dpy && dpy->vmw_fd >= 0) {         /* svga pixmaps: the CPU wrote the image, the GPU will draw over it */
       if (cur->DrawSurface && sym_egl_surface(cur->DrawSurface)->gpu_pixmap)
          sym_pixmap_upload(sym_egl_surface(cur->DrawSurface), sym_egl_context(cur)->st->pipe);
