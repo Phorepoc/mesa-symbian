@@ -587,7 +587,9 @@ dispatch(unsigned long cmd, void *data, unsigned long size)
    }
    case DRM_VMW_GB_SURFACE_REF:
    case DRM_VMW_GB_SURFACE_REF_EXT: {
-      const uint32_t sid = ((struct drm_vmw_surface_arg *)data)->sid;
+      uint32_t sid = ((struct drm_vmw_surface_arg *)data)->sid;
+      if (((struct drm_vmw_surface_arg *)data)->handle_type == DRM_VMW_HANDLE_PRIME || sid >= PRIME_BASE)
+         sid -= PRIME_BASE;   /* (DRM >= 2.6: Mesa passes the prime fd itself as the sid) */
       if (sid < V.info.surf_base || sid >= V.info.surf_base + V.info.surf_count || !V.surfs[sid - V.info.surf_base].imported)
          return -EINVAL;   /* (only imports are shared by handle) */
       const struct surf *sf = &V.surfs[sid - V.info.surf_base];
