@@ -4,7 +4,7 @@ This is [Mesa](https://mesa3d.org) on Phorepoc OS. It gives [Phorepoc OS](https:
 with EGL, so 3D games and apps run. On boards with a Mali-400 GPU it draws with it through Mesa's lima driver, and on
 any other board it falls back to softpipe, Mesa's software renderer.
 
-We don't keep a copy of Mesa here. The build downloads the release named in `mesa.lock` (26.2.4 at the moment) and
+This repository does not keep a copy of Mesa. The build downloads the release named in `mesa.lock` (26.2.4 at the moment) and
 compiles it for Phorepoc OS. This repository holds the parts Phorepoc OS needs on top:
 
 - `symbian/src/` has the EGL driver, the glue between Mesa and the system's windows, and a small emulation of the Linux
