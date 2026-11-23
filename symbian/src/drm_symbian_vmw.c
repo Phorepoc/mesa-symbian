@@ -52,6 +52,7 @@ struct surf {
    int shown;                /* an import that is the screen target (sym_vmw_present_import): never read back */
    int target;               /* an import the GPU draws into (READBACK after each command stream), else a source the CPU writes (UPDATE before) */
    uint32_t format, width, height, flags, backup;
+   uint8_t *shadow;          /* a source import: its pixels as last sent to the host (only the rows that changed are UPDATEd) */
 };
 
 /* mmap offset of an import's buffer (outside the pool's offsets): the import's own address is returned */
@@ -477,8 +478,45 @@ do_unref_surface(uint32_t sid)
    cmd_run(&w, SVGA3D_INVALID_ID, "surface destroy");
    if (s->bo)
       bo_unref(s->bo);   /* the surface's binding; the user's handle goes with UNREF_DMABUF */
+   free(s->shadow);
    memset(s, 0, sizeof(*s));
    return 0;
+}
+
+/* UPDATE a source import: only the rows that differ from what the host was last sent (a 4 MB UI layer where one icon
+   changed costs one small box, not the whole surface); the first update and any import without memory send it whole */
+static void
+import_update_rows(struct cmdw *w, uint32_t i)
+{
+   struct surf *s = &V.surfs[i];
+   const struct bo *b = s->bo ? bo_of(s->bo) : NULL;
+   const uint32_t pitch = s->width * 4, rows = s->height;
+   const uint8_t *px = b ? (const uint8_t *)b->cpu : NULL;
+   if (px && !s->shadow && (s->shadow = malloc((size_t)pitch * rows)))
+      memcpy(s->shadow, px, (size_t)pitch * rows);
+   else if (px && s->shadow) {
+      uint32_t y0 = 0, y1 = rows;
+      while (y0 < rows && !memcmp(px + (size_t)y0 * pitch, s->shadow + (size_t)y0 * pitch, pitch))
+         y0++;
+      if (y0 == rows)
+         return;   /* unchanged: nothing to send */
+      while (y1 > y0 + 1 && !memcmp(px + (size_t)(y1 - 1) * pitch, s->shadow + (size_t)(y1 - 1) * pitch, pitch))
+         y1--;
+      memcpy(s->shadow + (size_t)y0 * pitch, px + (size_t)y0 * pitch, (size_t)(y1 - y0) * pitch);
+      SVGA3dCmdUpdateGBImage *c = cmd_add(w, SVGA_3D_CMD_UPDATE_GB_IMAGE, sizeof(*c));
+      c->image.sid = V.info.surf_base + i;
+      c->image.face = 0;
+      c->image.mipmap = 0;
+      c->box.x = 0;
+      c->box.y = y0;
+      c->box.z = 0;
+      c->box.w = s->width;
+      c->box.h = y1 - y0;
+      c->box.d = 1;
+      return;
+   }
+   SVGA3dCmdUpdateGBSurface *c = cmd_add(w, SVGA_3D_CMD_UPDATE_GB_SURFACE, sizeof(*c));
+   c->sid = V.info.surf_base + i;
 }
 
 static int
@@ -494,11 +532,9 @@ do_execbuf(const struct drm_vmw_execbuf_arg *a)
    if (a->command_size && V.import_stale) {   /* zero-copy imports: the host re-reads what the CPU wrote into the sources */
       struct cmdw w;
       cmd_begin(&w);
-      for (uint32_t i = 0; i < V.surf_high && w.bytes + 16 <= V.arena_bytes; i++)
-         if (V.surfs[i].imported && !V.surfs[i].target) {
-            SVGA3dCmdUpdateGBSurface *c = cmd_add(&w, SVGA_3D_CMD_UPDATE_GB_SURFACE, sizeof(*c));
-            c->sid = V.info.surf_base + i;
-         }
+      for (uint32_t i = 0; i < V.surf_high && w.bytes + 64 <= V.arena_bytes; i++)
+         if (V.surfs[i].imported && !V.surfs[i].target)
+            import_update_rows(&w, i);
       if (w.bytes)
          cmd_run(&w, SVGA3D_INVALID_ID, "import update");
       V.import_stale = 0;
@@ -824,6 +860,8 @@ sym_vmw_unimport(int prime_fd)
       if (sf->imported && sf->bo) {
          const uint32_t bo = sf->bo;
          sf->imported = 0;   /* (the surface itself goes with Mesa's UNREF_SURFACE) */
+         free(sf->shadow);
+         sf->shadow = NULL;
          bo_unref(bo);
       }
    }
