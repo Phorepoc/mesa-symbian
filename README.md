@@ -30,7 +30,5 @@ The libraries end up in `core/build/mesa-build/arm/`, ready for the board build 
 
 ## License
 
-Our code is MIT, like Mesa. Three files are adapted from Mesa's Haiku support and keep their authors' copyright, which
-`NOTICE` lists. Mesa itself keeps its own licenses.
-
-Contributions are welcome under the same terms. Add your name to `AUTHORS` in your first pull request.
+This repository is under Mesa's licence (MIT), as port work on Mesa. Three files are adapted from Mesa's Haiku support; `NOTICE` lists them with their authors. Mesa itself keeps its own licenses.
+Files adapted from other projects keep their authors' copyright (see `AUTHORS` and `NOTICE`). Contributions are under the same terms. Add your name to `AUTHORS` in your first pull request.
