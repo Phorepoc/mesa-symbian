@@ -374,6 +374,33 @@ PATCH.setdefault("libsvga", {})["svga_format.c"] = [
     ("   if (verbose) {\n      debug_printf(\"Incompatible imported surface format.\\n\");\n      debug_printf(",
      "   if (verbose) {   /* OURS (Symbian): to Mesa's log */\n      mesa_loge(\"Incompatible imported surface format.\");\n      mesa_loge(")]
 
+# round 42e (test): where svga_draw_vbo's CPU time goes -- state validation vs the draw emit; every 60 draws
+PATCH["libsvga"]["svga_pipe_draw.c"] = [
+    ("#include \"util/u_draw.h\"\n",
+     "#include \"util/u_draw.h\"\n"
+     "unsigned symgl_now_us(void);\nvoid symgl_log(const char *);\n#include <stdio.h>\n"
+     "static unsigned ph_n, ph_state, ph_emit, ph_tail, ph_max;\n"),
+    ("   SVGA_STATS_TIME_PUSH(svga_sws(svga), SVGA_STATS_TIME_DRAWVBO);\n",
+     "   SVGA_STATS_TIME_PUSH(svga_sws(svga), SVGA_STATS_TIME_DRAWVBO);\n   const unsigned ph_t0 = symgl_now_us(); unsigned ph_t1 = ph_t0, ph_t2 = ph_t0;\n"),
+    ("      if (indirect && indirect->count_from_stream_output && count == 0) {\n",
+     "      ph_t1 = symgl_now_us();\n      if (indirect && indirect->count_from_stream_output && count == 0) {\n"),
+    ("   svga_mark_surfaces_dirty(svga_context(pipe));\n",
+     "   ph_t2 = symgl_now_us();\n   svga_mark_surfaces_dirty(svga_context(pipe));\n"
+     "   {  /* OURS (round 42e test) */\n"
+     "      const unsigned ph_t3 = symgl_now_us(), tot = ph_t3 - ph_t0;\n"
+     "      if (ph_t1 >= ph_t0 && ph_t2 >= ph_t1 && ph_t3 >= ph_t2) {\n"
+     "         ph_state += ph_t1 - ph_t0; ph_emit += ph_t2 - ph_t1; ph_tail += ph_t3 - ph_t2; if (tot > ph_max) ph_max = tot;\n"
+     "         if (++ph_n == 60) {\n"
+     "            char m[200];\n"
+     "            snprintf(m, sizeof(m), \"[symgl] svga draw x60: state %u us emit %u us dirty %u us (avg), max total %u us\",\n"
+     "                     ph_state / 60, ph_emit / 60, ph_tail / 60, ph_max);\n"
+     "            symgl_log(m);\n"
+     "            ph_n = ph_state = ph_emit = ph_tail = ph_max = 0;\n"
+     "         }\n"
+     "      }\n"
+     "   }\n"),
+]
+
 if ARCH == "x32":
     # x86 only: gallium's vertex translator JIT-compiles x86 code at run time (translate_sse.c over rtasm's executable
     # memory, rtasm_execmem.c: dropped above). A Symbian process has no memory it can both write and run, so the
