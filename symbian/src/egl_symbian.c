@@ -742,7 +742,23 @@ sym_egl_present_image(EGLDisplay d, EGLImage image)
    struct sym_egl_image *img = (struct sym_egl_image *)i;
    if (!SYM_VMW_PRIME(img->prime_fd) || !img->tex)
       return EGL_FALSE;
-   return sym_vmw_present_import(img->prime_fd, img->tex->width0, img->tex->height0) == 0 ? EGL_TRUE : EGL_FALSE;
+   const EGLBoolean shown = sym_vmw_present_import(img->prime_fd, img->tex->width0, img->tex->height0) == 0 ? EGL_TRUE : EGL_FALSE;
+   /* round 42 (test): the composer never swaps, so sym_prof_frame's per-swap counters never print for it. Per present (= per
+      composition): command buffers, their synchronous submit time, ioctls, bytes; every 60 presents */
+   static unsigned n, first;
+   const unsigned now = symgl_now_us();
+   if (!n++)
+      first = now;
+   if (n == 60) {
+      char msg[300];
+      snprintf(msg, sizeof(msg), "[symgl] present prof/frame: command buffers %u (%u bytes) submit %u us, ioctls %u in %u us, objects %u in %u us; 60 presents in %u ms",
+               sym_vmw_prof_cbs / n, sym_vmw_prof_bytes / n, sym_vmw_prof_us / n, sym_vmw_prof_ioctls / n, sym_vmw_prof_ioctl_us / n,
+               sym_vmw_prof_objs / n, sym_vmw_prof_obj_us / n, SYM_DUS(first, now) / 1000);
+      symgl_log(msg);
+      n = 0;
+      sym_vmw_prof_cbs = sym_vmw_prof_us = sym_vmw_prof_bytes = sym_vmw_prof_ioctls = sym_vmw_prof_ioctl_us = sym_vmw_prof_objs = sym_vmw_prof_obj_us = 0;
+   }
+   return shown;
 #else
    (void)d; (void)image;
    return EGL_FALSE;
