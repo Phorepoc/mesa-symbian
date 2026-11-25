@@ -951,6 +951,9 @@ def main() -> int:
         if r.returncode != 0:
             with open(err, "w", newline="\n") as f:
                 f.write(" ".join(shlex.quote(c) for c in cmd) + "\n\n" + r.stderr)
+            # the first errors in the build log too (a CI run keeps no err/ dir)
+            print(f"  FAILED {lib}/{os.path.basename(src)}:\n" + "\n".join(
+                l for l in r.stderr.splitlines() if "error" in l)[:2000])
             return lib, obj, False
         if os.path.exists(err):
             os.remove(err)
