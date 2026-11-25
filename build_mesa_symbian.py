@@ -507,6 +507,34 @@ PATCH["libsvgadrm"]["vmw_context.c"] = [
      "   if (vswc->preemptive_flush ||\n      vswc->command.used + nr_bytes > vswc->command.size ||\n"),
 ]
 
+# round 42j (test): 42i showed no refused reserve, yet a texture rebind (= a context flush) before every draw: WHO
+# flushes. svga_context_flush becomes a macro passing its call site; every 60 flushes, the sites by count
+PATCH["libsvga"]["svga_context.h"] = [
+    ("void svga_context_flush( struct svga_context *svga,\n                         struct pipe_fence_handle **pfence );\n",
+     "void svga_context_flush_at( struct svga_context *svga,\n                         struct pipe_fence_handle **pfence, const char *ph_f, int ph_l );\n"
+     "#define svga_context_flush(s, f) svga_context_flush_at((s), (f), __FILE__, __LINE__)  /* OURS (round 42j test) */\n"),
+]
+PATCH["libsvga"]["svga_context.c"] = [
+    ("void\nsvga_context_flush(struct svga_context *svga,\n                   struct pipe_fence_handle **pfence)\n{\n",
+     "void symgl_log(const char *);\n#include <stdio.h>\n#include <string.h>\n"
+     "static const char *ph_sf[8]; static int ph_sl[8]; static unsigned ph_sn[8], ph_st;  /* OURS (round 42j test) */\n"
+     "void\nsvga_context_flush_at(struct svga_context *svga,\n                   struct pipe_fence_handle **pfence, const char *ph_f, int ph_l)\n{\n"
+     "   {\n"
+     "      int i;\n"
+     "      for (i = 0; i < 8 && ph_sf[i] && !(ph_sl[i] == ph_l && !strcmp(ph_sf[i], ph_f)); i++) ;\n"
+     "      if (i < 8) { if (!ph_sf[i]) { ph_sf[i] = ph_f; ph_sl[i] = ph_l; } ++ph_sn[i]; }\n"
+     "      if (++ph_st == 60) {\n"
+     "         char m[400]; int n = snprintf(m, sizeof(m), \"[symgl] flush sites x60:\");\n"
+     "         for (i = 0; i < 8 && ph_sf[i] && n < (int)sizeof(m) - 48; i++) {\n"
+     "            const char *b = strrchr(ph_sf[i], '/');\n"
+     "            n += snprintf(m + n, sizeof(m) - n, \" %s:%d=%u\", b ? b + 1 : ph_sf[i], ph_sl[i], ph_sn[i]);\n"
+     "            ph_sn[i] = 0;\n"
+     "         }\n"
+     "         symgl_log(m); ph_st = 0;\n"
+     "      }\n"
+     "   }\n"),
+]
+
 if ARCH == "x32":
     # x86 only: gallium's vertex translator JIT-compiles x86 code at run time (translate_sse.c over rtasm's executable
     # memory, rtasm_execmem.c: dropped above). A Symbian process has no memory it can both write and run, so the
