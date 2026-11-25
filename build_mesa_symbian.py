@@ -517,6 +517,7 @@ PATCH["libsvga"]["svga_context.h"] = [
 PATCH["libsvga"]["svga_context.c"] = [
     ("void\nsvga_context_flush(struct svga_context *svga,\n                   struct pipe_fence_handle **pfence)\n{\n",
      "void symgl_log(const char *);\n#include <stdio.h>\n#include <string.h>\n"
+     "#pragma GCC diagnostic ignored \"-Wformat-truncation\"\n#pragma GCC diagnostic ignored \"-Wformat\"\n"
      "static const char *ph_sf[8]; static int ph_sl[8]; static unsigned ph_sn[8], ph_st;  /* OURS (round 42j test) */\n"
      "#undef svga_context_flush  /* callers outside this library (phgl's own sources) link the plain name */\n"
      "void svga_context_flush(struct svga_context *svga, struct pipe_fence_handle **pfence);\n"
