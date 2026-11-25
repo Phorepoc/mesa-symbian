@@ -519,6 +519,7 @@ PATCH["libsvga"]["svga_context.c"] = [
      "void symgl_log(const char *);\n#include <stdio.h>\n#include <string.h>\n"
      "static const char *ph_sf[8]; static int ph_sl[8]; static unsigned ph_sn[8], ph_st;  /* OURS (round 42j test) */\n"
      "#undef svga_context_flush  /* callers outside this library (phgl's own sources) link the plain name */\n"
+     "void svga_context_flush(struct svga_context *svga, struct pipe_fence_handle **pfence);\n"
      "void svga_context_flush(struct svga_context *svga, struct pipe_fence_handle **pfence)\n"
      "{ svga_context_flush_at(svga, pfence, \"outside-libsvga\", 0); }\n"
      "void\nsvga_context_flush_at(struct svga_context *svga,\n                   struct pipe_fence_handle **pfence, const char *ph_f, int ph_l)\n{\n"
