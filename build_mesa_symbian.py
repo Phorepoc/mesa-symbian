@@ -435,7 +435,15 @@ PATCH["libsvga"]["svga_draw.c"] = [
     ("#include \"util/u_inlines.h\"\n",
      "#include \"util/u_inlines.h\"\n"
      "unsigned symgl_now_us(void);\nvoid symgl_log(const char *);\n#include <stdio.h>\n"
-     "static unsigned ph_gn, ph_gs, ph_gc, ph_gv;\n"),
+     "static unsigned ph_gn, ph_gs, ph_gc, ph_gv, ph_rb, ph_rbn, ph_rbf;\n"),
+    ("      if (svga->rebind.flags.texture_samplers) {\n         for (i = 0; i < count; i++) {\n            if (surfaces[i]) {\n"
+     "               ret = svga->swc->resource_rebind(svga->swc,\n                                                surfaces[i],\n"
+     "                                                NULL,\n                                                SVGA_RELOC_READ);\n",
+     "      if (svga->rebind.flags.texture_samplers) {\n         ++ph_rbf;\n         for (i = 0; i < count; i++) {\n            if (surfaces[i]) {\n"
+     "               const unsigned ph_r0 = symgl_now_us();\n"
+     "               ret = svga->swc->resource_rebind(svga->swc,\n                                                surfaces[i],\n"
+     "                                                NULL,\n                                                SVGA_RELOC_READ);\n"
+     "               { const unsigned d = symgl_now_us() - ph_r0; if ((int)d >= 0) ph_rb += d; ++ph_rbn; }\n"),
     ("   ret = svga_validate_sampler_resources(svga, SVGA_PIPE_GRAPHICS);\n",
      "   const unsigned ph_g0 = symgl_now_us();\n"
      "   ret = svga_validate_sampler_resources(svga, SVGA_PIPE_GRAPHICS);\n"
@@ -453,10 +461,10 @@ PATCH["libsvga"]["svga_draw.c"] = [
      "      }\n"
      "      if (++ph_gn == 60) {\n"
      "         char m[160];\n"
-     "         snprintf(m, sizeof(m), \"[symgl] vgpu10 x60: samplers %u us consts %u us vbufs %u us (avg)\",\n"
-     "                  ph_gs / 60, ph_gc / 60, ph_gv / 60);\n"
+     "         snprintf(m, sizeof(m), \"[symgl] vgpu10 x60: samplers %u us consts %u us vbufs %u us (avg) | rebind flag %u draws, %u rebinds, %u us\",\n"
+     "                  ph_gs / 60, ph_gc / 60, ph_gv / 60, ph_rbf, ph_rbn, ph_rb);\n"
      "         symgl_log(m);\n"
-     "         ph_gn = ph_gs = ph_gc = ph_gv = 0;\n"
+     "         ph_gn = ph_gs = ph_gc = ph_gv = ph_rb = ph_rbn = ph_rbf = 0;\n"
      "      }\n"
      "   }\n"),
 ]
