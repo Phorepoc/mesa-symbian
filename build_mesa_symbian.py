@@ -539,6 +539,31 @@ PATCH["libsvga"]["svga_context.c"] = [
      "      }\n"
      "   }\n"),
 ]
+# round 42k (test): 42j = every flush via pipe->flush (svga_pipe_flush.c:33). One level up: each GL-side caller of
+# pipe->flush names itself in ph_flush_why, and svga_flush files the flush under that name (the 42j histogram)
+PH_WHY = "{ extern const char *ph_flush_why; ph_flush_why = \"%s\"; }  /* OURS (round 42k test) */\n"
+PATCH["libsvga"]["svga_pipe_flush.c"] = [
+    ("   svga_context_flush(svga, fence);\n",
+     "   {\n      extern const char *ph_flush_why;\n"
+     "      svga_context_flush_at(svga, fence, ph_flush_why ? ph_flush_why : \"pipe-other\", 0);\n"
+     "      ph_flush_why = 0;\n   }\n"),
+    ("static void\nsvga_flush(", "extern const char *ph_flush_why;\nconst char *ph_flush_why;  /* OURS (round 42k test) */\n"
+     "static void\nsvga_flush("),
+]
+PATCH["libmesa"]["st_cb_flush.c"] = [
+    ("   st_flush(st, &fence, PIPE_FLUSH_ASYNC | PIPE_FLUSH_HINT_FINISH);\n",
+     "   " + PH_WHY % "glFinish" + "   st_flush(st, &fence, PIPE_FLUSH_ASYNC | PIPE_FLUSH_HINT_FINISH);\n"),
+    ("   st_flush(st, NULL, gallium_flush_flags);\n",
+     "   " + PH_WHY % "glFlush" + "   st_flush(st, NULL, gallium_flush_flags);\n"),
+]
+PATCH["libmesa"]["st_manager.c"] += [
+    ("      before_flush_cb(args);\n   st_flush(st, fence, pipe_flags);\n",
+     "      before_flush_cb(args);\n   " + PH_WHY % "st_context_flush(egl)" + "   st_flush(st, fence, pipe_flags);\n"),
+]
+PATCH["libmesa"]["syncobj.c"] = [
+    ("      ctx->pipe->flush(ctx->pipe, &syncObj->fence,",
+     "      " + PH_WHY % "glFenceSync" + "      ctx->pipe->flush(ctx->pipe, &syncObj->fence,"),
+]
 
 if ARCH == "x32":
     # x86 only: gallium's vertex translator JIT-compiles x86 code at run time (translate_sse.c over rtasm's executable
