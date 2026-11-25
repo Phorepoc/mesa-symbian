@@ -401,6 +401,35 @@ PATCH["libsvga"]["svga_pipe_draw.c"] = [
      "   }\n"),
 ]
 
+# round 42f (test): above the driver -- st_prepare_draw (state-tracker validation) vs cso_draw_vbo; every 60 draws
+PATCH["libmesa"]["st_draw.c"] = [
+    ("#include \"main/context.h\"\n",
+     "#include \"main/context.h\"\n"
+     "unsigned symgl_now_us(void);\nvoid symgl_log(const char *);\n#include <stdio.h>\n"
+     "static unsigned ph_pn, ph_prep, ph_pmax, ph_dn, ph_drw, ph_dmax;\n"),
+    ("   /* Validate state. */\n   st_validate_state(st, state_mask);\n   st_context_add_work(st);\n",
+     "   /* Validate state. */\n   const unsigned ph_t0 = symgl_now_us();\n"
+     "   st_validate_state(st, state_mask);\n   st_context_add_work(st);\n"
+     "   {  /* OURS (round 42f test) */\n"
+     "      const unsigned d = symgl_now_us() - ph_t0;\n"
+     "      if ((int)d >= 0) { ph_prep += d; if (d > ph_pmax) ph_pmax = d; }\n"
+     "      if (++ph_pn == 60) {\n"
+     "         char m[160];\n"
+     "         snprintf(m, sizeof(m), \"[symgl] st x60: validate avg %u us max %u | cso_draw_vbo avg %u us max %u (%u)\",\n"
+     "                  ph_prep / 60, ph_pmax, ph_dn ? ph_drw / ph_dn : 0, ph_dmax, ph_dn);\n"
+     "         symgl_log(m);\n"
+     "         ph_pn = ph_prep = ph_pmax = ph_dn = ph_drw = ph_dmax = 0;\n"
+     "      }\n"
+     "   }\n"),
+    ("   cso_draw_vbo(st->cso_context, info, drawid_offset, indirect, draws, num_draws);\n}\n",
+     "   const unsigned ph_d0 = symgl_now_us();\n"
+     "   cso_draw_vbo(st->cso_context, info, drawid_offset, indirect, draws, num_draws);\n"
+     "   {  /* OURS (round 42f test) */\n"
+     "      const unsigned d = symgl_now_us() - ph_d0;\n"
+     "      if ((int)d >= 0) { ph_drw += d; ++ph_dn; if (d > ph_dmax) ph_dmax = d; }\n"
+     "   }\n}\n"),
+]
+
 if ARCH == "x32":
     # x86 only: gallium's vertex translator JIT-compiles x86 code at run time (translate_sse.c over rtasm's executable
     # memory, rtasm_execmem.c: dropped above). A Symbian process has no memory it can both write and run, so the
