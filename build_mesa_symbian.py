@@ -552,7 +552,8 @@ if ARCH == "x32":
 
 # libraries whose PATCH touches a header: compiled from a mirror of this source directory (make_mirror)
 MIRROR = {"libsoftpipe": "src/gallium/drivers/softpipe",
-          "libmesa_util": "src/util"}   # (the ASTC LUT header is patched)
+          "libmesa_util": "src/util",   # (the ASTC LUT header is patched)
+          "libsvga": "src/gallium/drivers/svga"}   # (round 42j test: svga_context.h)
 
 # OURS sources added to a library (compiled with that library's include dirs + macros)
 EXTRA = {
