@@ -469,6 +469,44 @@ PATCH["libsvga"]["svga_draw.c"] = [
      "   }\n"),
 ]
 
+# round 42i: why every draw flushes (vmw_swc_reserve refuses -> SVGA_RETRY flushes): count the refusals by cause (the
+# preemptive flush by trigger kind / a full command or relocation list), every 60; and the region trigger's limit:
+# upstream's 16 MB/5 is the Linux kernel's GMR pool, and one 720x1280 source (3.69 MB) passes it on every draw -- here
+# the guest-memory limit the device channel reports for MOBs (max_mob_memory / 2), as the MOB trigger uses
+PATCH["libsvgadrm"]["vmw_context.c"] = [
+    ("#include \"vmw_query.h\"\n",
+     "#include \"vmw_query.h\"\n"
+     "void symgl_log(const char *);\n#include <stdio.h>\n"
+     "static unsigned ph_rn, ph_pk, ph_rk[8];  /* OURS (round 42i): last preemptive trigger; refusals by cause */\n"),
+    ("          vswc->seen_regions >= VMW_GMR_POOL_SIZE/5)\n         vswc->preemptive_flush = true;\n",
+     "          vswc->seen_regions >= vswc->vws->ioctl.max_mob_memory / VMW_MAX_MOB_MEM_FACTOR)  /* OURS (42i) */\n"
+     "         { vswc->preemptive_flush = true; ph_pk = 1; }\n"),
+    ("            vswc->vws->ioctl.max_mob_memory / VMW_MAX_MOB_MEM_FACTOR)\n         vswc->preemptive_flush = true;\n",
+     "            vswc->vws->ioctl.max_mob_memory / VMW_MAX_MOB_MEM_FACTOR)\n         { vswc->preemptive_flush = true; ph_pk = 2; }\n"),
+    ("            vswc->vws->ioctl.max_surface_memory / VMW_MAX_SURF_MEM_FACTOR)\n         vswc->preemptive_flush = true;\n",
+     "            vswc->vws->ioctl.max_surface_memory / VMW_MAX_SURF_MEM_FACTOR)\n         { vswc->preemptive_flush = true; ph_pk = 3; }\n"),
+    ("   if (vswc->preemptive_flush ||\n      vswc->command.used + nr_bytes > vswc->command.size ||\n",
+     "   {  /* OURS (round 42i): which cause refuses */\n"
+     "      const unsigned k = vswc->preemptive_flush ? ph_pk :\n"
+     "         vswc->command.used + nr_bytes > vswc->command.size ? 4 :\n"
+     "         vswc->surface.used + nr_relocs > vswc->surface.size ? 5 :\n"
+     "         vswc->shader.used + nr_relocs > vswc->shader.size ? 6 :\n"
+     "         vswc->region.used + nr_relocs > vswc->region.size ? 7 : 0;\n"
+     "      if (k) {\n"
+     "         ++ph_rk[k];\n"
+     "         if (++ph_rn == 60) {\n"
+     "            char m[200];\n"
+     "            snprintf(m, sizeof(m), \"[symgl] vmw reserve refused x60: region %u mob %u surface %u | cmd %u srel %u shrel %u rrel %u | mob limit %u MB surf limit %u MB\",\n"
+     "                     ph_rk[1], ph_rk[2], ph_rk[3], ph_rk[4], ph_rk[5], ph_rk[6], ph_rk[7],\n"
+     "                     (unsigned)(vswc->vws->ioctl.max_mob_memory >> 20), (unsigned)(vswc->vws->ioctl.max_surface_memory >> 20));\n"
+     "            symgl_log(m);\n"
+     "            ph_rn = 0; for (int i = 0; i < 8; i++) ph_rk[i] = 0;\n"
+     "         }\n"
+     "      }\n"
+     "   }\n"
+     "   if (vswc->preemptive_flush ||\n      vswc->command.used + nr_bytes > vswc->command.size ||\n"),
+]
+
 if ARCH == "x32":
     # x86 only: gallium's vertex translator JIT-compiles x86 code at run time (translate_sse.c over rtasm's executable
     # memory, rtasm_execmem.c: dropped above). A Symbian process has no memory it can both write and run, so the
