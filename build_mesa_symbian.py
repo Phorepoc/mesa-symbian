@@ -430,6 +430,37 @@ PATCH["libmesa"]["st_draw.c"] = [
      "   }\n}\n"),
 ]
 
+# round 42g (test): inside svga_hwtnl_draw (draw_vgpu10) -- sampler / constant / vertex buffer validation; every 60 draws
+PATCH["libsvga"]["svga_draw.c"] = [
+    ("#include \"util/u_inlines.h\"\n",
+     "#include \"util/u_inlines.h\"\n"
+     "unsigned symgl_now_us(void);\nvoid symgl_log(const char *);\n#include <stdio.h>\n"
+     "static unsigned ph_gn, ph_gs, ph_gc, ph_gv;\n"),
+    ("   ret = svga_validate_sampler_resources(svga, SVGA_PIPE_GRAPHICS);\n",
+     "   const unsigned ph_g0 = symgl_now_us();\n"
+     "   ret = svga_validate_sampler_resources(svga, SVGA_PIPE_GRAPHICS);\n"
+     "   const unsigned ph_g1 = symgl_now_us();\n"),
+    ("   ret = svga_validate_constant_buffers(svga, SVGA_PIPE_GRAPHICS);\n   if (ret != PIPE_OK)\n      return ret;\n",
+     "   ret = svga_validate_constant_buffers(svga, SVGA_PIPE_GRAPHICS);\n   if (ret != PIPE_OK)\n      return ret;\n"
+     "   const unsigned ph_g2 = symgl_now_us();\n"),
+    ("   ret = validate_vertex_buffers(hwtnl, so_vertex_count);\n",
+     "   const unsigned ph_g3 = symgl_now_us();\n"
+     "   ret = validate_vertex_buffers(hwtnl, so_vertex_count);\n"
+     "   {  /* OURS (round 42g test) */\n"
+     "      const unsigned ph_g4 = symgl_now_us();\n"
+     "      if (ph_g1 >= ph_g0 && ph_g2 >= ph_g1 && ph_g4 >= ph_g3) {\n"
+     "         ph_gs += ph_g1 - ph_g0; ph_gc += ph_g2 - ph_g1; ph_gv += ph_g4 - ph_g3;\n"
+     "      }\n"
+     "      if (++ph_gn == 60) {\n"
+     "         char m[160];\n"
+     "         snprintf(m, sizeof(m), \"[symgl] vgpu10 x60: samplers %u us consts %u us vbufs %u us (avg)\",\n"
+     "                  ph_gs / 60, ph_gc / 60, ph_gv / 60);\n"
+     "         symgl_log(m);\n"
+     "         ph_gn = ph_gs = ph_gc = ph_gv = 0;\n"
+     "      }\n"
+     "   }\n"),
+]
+
 if ARCH == "x32":
     # x86 only: gallium's vertex translator JIT-compiles x86 code at run time (translate_sse.c over rtasm's executable
     # memory, rtasm_execmem.c: dropped above). A Symbian process has no memory it can both write and run, so the
