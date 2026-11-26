@@ -17,6 +17,44 @@
 #define CLOCK_MONOTONIC CLOCK_REALTIME
 #endif
 
+/* Mesa's mutexes and condition variables are OURS (symbian/src/phe_mutex.cpp: one atomic per uncontended
+ * lock/unlock instead of P.I.P.S.' RMutex + RSemaphore pair). The attribute types stay P.I.P.S.'. */
+#include "phe_mutex.h"
+#ifdef __cplusplus
+extern "C" {
+#endif
+int phe_mutex_init(phe_mutex_t *m, const pthread_mutexattr_t *a);
+int phe_mutex_destroy(phe_mutex_t *m);
+int phe_mutex_lock(phe_mutex_t *m);
+int phe_mutex_trylock(phe_mutex_t *m);
+int phe_mutex_unlock(phe_mutex_t *m);
+int phe_cond_init(phe_cond_t *c, const pthread_condattr_t *a);
+int phe_cond_destroy(phe_cond_t *c);
+int phe_cond_signal(phe_cond_t *c);
+int phe_cond_broadcast(phe_cond_t *c);
+int phe_cond_wait(phe_cond_t *c, phe_mutex_t *m);
+int phe_cond_timedwait(phe_cond_t *c, phe_mutex_t *m, const struct timespec *abs);
+#ifdef __cplusplus
+}
+#endif
+#undef PTHREAD_MUTEX_INITIALIZER
+#undef PTHREAD_COND_INITIALIZER
+#define pthread_mutex_t phe_mutex_t
+#define pthread_cond_t phe_cond_t
+#define PTHREAD_MUTEX_INITIALIZER PHE_MUTEX_INITIALIZER
+#define PTHREAD_COND_INITIALIZER PHE_COND_INITIALIZER
+#define pthread_mutex_init phe_mutex_init
+#define pthread_mutex_destroy phe_mutex_destroy
+#define pthread_mutex_lock phe_mutex_lock
+#define pthread_mutex_trylock phe_mutex_trylock
+#define pthread_mutex_unlock phe_mutex_unlock
+#define pthread_cond_init phe_cond_init
+#define pthread_cond_destroy phe_cond_destroy
+#define pthread_cond_signal phe_cond_signal
+#define pthread_cond_broadcast phe_cond_broadcast
+#define pthread_cond_wait phe_cond_wait
+#define pthread_cond_timedwait phe_cond_timedwait
+
 /* condition variables time out against CLOCK_REALTIME only (P.I.P.S.); Mesa's cnd_monotonic asks for monotonic */
 static inline int pthread_condattr_setclock(pthread_condattr_t *attr, clockid_t clk)
 {
