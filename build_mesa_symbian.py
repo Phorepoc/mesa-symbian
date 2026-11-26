@@ -552,6 +552,36 @@ PATCH_R46 = [
      "   mtx_unlock(&vsrf->mutex);\n   return data;\n}"),
 ]
 
+# round 48 (test): every acquire site of a surface's mutex in vmw_surface.c tags the shared record (site, thread, time),
+# so the relocation's failed trylock (r47) can name the site that held it
+PATCH_R48 = [
+    ("static unsigned r46_n,",
+     "unsigned ph_r48_site, ph_r48_tid, ph_r48_t;  /* OURS (round 48 test): the last surface-mutex acquire */\n"
+     "#include <string.h>\n#include \"c11/threads.h\"\n"
+     "static void ph_r48(unsigned s) { thrd_t t = thrd_current(); unsigned v = 0; memcpy(&v, &t, sizeof(v) < sizeof(t) ? sizeof(v) : sizeof(t)); ph_r48_site = s; ph_r48_tid = v; ph_r48_t = symgl_now_us(); }\n"
+     "static unsigned r46_n,"),
+    ("   mtx_lock(&vsrf->mutex);\n   data = vmw_svga_winsys_buffer_map(&vws->base, vsrf->buf, pb_flags);\n",
+     "   mtx_lock(&vsrf->mutex); ph_r48(1);  /* OURS (r48): surface init */\n   data = vmw_svga_winsys_buffer_map(&vws->base, vsrf->buf, pb_flags);\n"),
+    ("   mtx_lock(&vsrf->mutex);\n   vmw_svga_winsys_buffer_unmap(&vsrf->screen->base, vsrf->buf);\nout_unlock:",
+     "   mtx_lock(&vsrf->mutex); ph_r48(2);  /* OURS (r48): surface init, unmap */\n   vmw_svga_winsys_buffer_unmap(&vsrf->screen->base, vsrf->buf);\nout_unlock:"),
+    ("   mtx_lock(&vsrf->mutex);\n   r46_t0 = symgl_now_us();",
+     "   mtx_lock(&vsrf->mutex); ph_r48(3);  /* OURS (r48): surface map */\n   r46_t0 = symgl_now_us();"),
+    ("   mtx_lock(&vsrf->mutex);\n   if (--vsrf->mapcount == 0) {",
+     "   mtx_lock(&vsrf->mutex); ph_r48(4);  /* OURS (r48): surface unmap */\n   if (--vsrf->mapcount == 0) {"),
+]
+# the relocation (vmw_context.c, after r44/r45/r47): tags site 5 when it gets the lock, prints the record on a failed trylock
+PATCH_R48_CTX = [
+    ("            const unsigned who = ph_holder(vsurf);\n",
+     "            const unsigned who = ph_holder(vsurf);\n"
+     "            extern unsigned ph_r48_site, ph_r48_tid, ph_r48_t;  /* OURS (round 48 test) */\n"
+     "            const unsigned hs = ph_r48_site, ht = ph_r48_tid, hage = symgl_now_us() - ph_r48_t;\n"),
+    ("\"[symgl] r47 surface %p was held: me tid %u, holder tid %u\", (void *)vsurf, ph_tid(), who);",
+     "\"[symgl] r48 surface %p was held: me tid %u, relocation holder %u | last acquire: site %u tid %u %u us ago\", (void *)vsurf, ph_tid(), who, hs, ht, hage);"),
+    ("         ph_hold(vsurf, ph_tid());\n",
+     "         ph_hold(vsurf, ph_tid());\n"
+     "         { extern unsigned ph_r48_site, ph_r48_tid, ph_r48_t; ph_r48_site = 5; ph_r48_tid = ph_tid(); ph_r48_t = symgl_now_us(); }  /* OURS (r48) */\n"),
+]
+
 # round 42i: why every draw flushes (vmw_swc_reserve refuses -> SVGA_RETRY flushes): count the refusals by cause (the
 # preemptive flush by trigger kind / a full command or relocation list), every 60; and the region trigger's limit:
 # upstream's 16 MB/5 is the Linux kernel's GMR pool, and one 720x1280 source (3.69 MB) passes it on every draw -- here
@@ -591,6 +621,8 @@ PATCH["libsvgadrm"]["vmw_context.c"] = [
 ]
 PATCH["libsvgadrm"]["vmw_context.c"] += PATCH_R44
 PATCH["libsvgadrm"].setdefault("vmw_surface.c", []).extend(PATCH_R46)
+PATCH["libsvgadrm"]["vmw_surface.c"] += PATCH_R48
+PATCH["libsvgadrm"]["vmw_context.c"] += PATCH_R48_CTX
 
 # round 42j (test): 42i showed no refused reserve, yet a texture rebind (= a context flush) before every draw: WHO
 # flushes. svga_context_flush becomes a macro passing its call site; every 60 flushes, the sites by count
