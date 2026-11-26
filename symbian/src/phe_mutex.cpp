@@ -7,6 +7,7 @@
 // after the same thread's unlock can still see EBUSY (composition round 48: every ~1 ms surface-mutex wait was the
 // compositor against itself). Here an uncontended lock/unlock is one atomic each; the semaphore (created on first
 // contention) is used only when a thread really has to sleep.
+#include <e32def.h>	// Mesa's flags drop the Symbian force-include (build_mesa_symbian.py): the base types first
 #include <e32std.h>
 #include <errno.h>
 #include <time.h>
@@ -83,6 +84,21 @@ extern "C" int phe_mutex_lock(phe_mutex_t* m)
 		m->count = 1;
 		}
 	return 0;
+	}
+
+// (Mesa's mtx_timedlock) a short sleep between tries: only the GLX/test paths take it
+extern "C" int phe_mutex_timedlock(phe_mutex_t* m, const struct timespec* aAbs)
+	{
+	for (;;)
+		{
+		if (phe_mutex_trylock(m) == 0)
+			return 0;
+		struct timespec now;
+		clock_gettime(CLOCK_REALTIME, &now);
+		if (now.tv_sec > aAbs->tv_sec || (now.tv_sec == aAbs->tv_sec && now.tv_nsec >= aAbs->tv_nsec))
+			return ETIMEDOUT;
+		User::AfterHighRes(1000);
+		}
 	}
 
 extern "C" int phe_mutex_trylock(phe_mutex_t* m)

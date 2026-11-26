@@ -27,6 +27,7 @@ int phe_mutex_init(phe_mutex_t *m, const pthread_mutexattr_t *a);
 int phe_mutex_destroy(phe_mutex_t *m);
 int phe_mutex_lock(phe_mutex_t *m);
 int phe_mutex_trylock(phe_mutex_t *m);
+int phe_mutex_timedlock(phe_mutex_t *m, const struct timespec *abs);
 int phe_mutex_unlock(phe_mutex_t *m);
 int phe_cond_init(phe_cond_t *c, const pthread_condattr_t *a);
 int phe_cond_destroy(phe_cond_t *c);
@@ -47,6 +48,7 @@ int phe_cond_timedwait(phe_cond_t *c, phe_mutex_t *m, const struct timespec *abs
 #define pthread_mutex_destroy phe_mutex_destroy
 #define pthread_mutex_lock phe_mutex_lock
 #define pthread_mutex_trylock phe_mutex_trylock
+#define pthread_mutex_timedlock phe_mutex_timedlock
 #define pthread_mutex_unlock phe_mutex_unlock
 #define pthread_cond_init phe_cond_init
 #define pthread_cond_destroy phe_cond_destroy
