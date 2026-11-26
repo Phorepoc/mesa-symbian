@@ -473,11 +473,14 @@ PATCH["libsvga"]["svga_draw.c"] = [
 # lookup + the mutex-guarded MOB relocation), the commit; the mutex wait alone; sums per 60 calls
 PATCH_R44 = [
     ("#include \"vmw_query.h\"\n",
-     "#include \"vmw_query.h\"\nstatic unsigned ph_mtx;  /* OURS (round 44 test): the relocation's mutex wait */\n"
+     "#include \"vmw_query.h\"\nstatic unsigned ph_mtx, ph_busy, ph_busy_us;  /* OURS (round 44 test): the relocation's mutex wait */\n"
      "unsigned symgl_now_us(void);\n"),
     ("      mtx_lock(&vsurf->mutex);\n      assert(vsurf->buf != NULL);\n",
      "      {  const unsigned m0 = symgl_now_us();\n"
-     "         mtx_lock(&vsurf->mutex);\n"
+     "         if (mtx_trylock(&vsurf->mutex) != thrd_success) {  /* OURS (round 45 test): held by another thread */\n"
+     "            ++ph_busy; mtx_lock(&vsurf->mutex);\n"
+     "            const unsigned mb = symgl_now_us(); if (mb >= m0) ph_busy_us += mb - m0;\n"
+     "         }\n"
      "         const unsigned m1 = symgl_now_us(); if (m1 >= m0) ph_mtx += m1 - m0; }  /* OURS (round 44 test) */\n"
      "      assert(vsurf->buf != NULL);\n"),
     ("   if (!vmw_swc_reserve(swc, 0, 1))\n      return PIPE_ERROR_OUT_OF_MEMORY;\n\n   if (surface)\n      vmw_swc_surface_relocation(swc, NULL, NULL, surface, flags);\n",
@@ -497,11 +500,11 @@ PATCH_R44 = [
      "         if (t3 - r44_t0 > r44_max) r44_max = t3 - r44_t0;\n"
      "      }\n"
      "      if (++r44_n == 60) {\n"
-     "         char m[200];\n"
-     "         snprintf(m, sizeof(m), \"[symgl] r44 rebind x60 (sum us): reserve %u relocation %u (mutex %u) commit %u | max %u\",\n"
-     "                  r44_res, r44_rel, ph_mtx, r44_com, r44_max);\n"
+     "         char m[240];\n"
+     "         snprintf(m, sizeof(m), \"[symgl] r44 rebind x60 (sum us): reserve %u relocation %u (mutex %u; held by another %u times, %u us) commit %u | max %u\",\n"
+     "                  r44_res, r44_rel, ph_mtx, ph_busy, ph_busy_us, r44_com, r44_max);\n"
      "         symgl_log(m);\n"
-     "         r44_n = r44_res = r44_rel = r44_com = r44_max = ph_mtx = 0;\n"
+     "         r44_n = r44_res = r44_rel = r44_com = r44_max = ph_mtx = ph_busy = ph_busy_us = 0;\n"
      "      }\n"
      "   }\n"
      "\n   return PIPE_OK;\n"),
