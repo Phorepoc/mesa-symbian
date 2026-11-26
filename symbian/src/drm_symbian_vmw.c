@@ -491,6 +491,11 @@ do_execbuf(const struct drm_vmw_execbuf_arg *a)
    struct drm_vmw_fence_rep *rep = (struct drm_vmw_fence_rep *)(uintptr_t)a->fence_rep;
    uint32_t seq = ++V.seqno;
    int targets = 0;
+   /* OURS (round 43 test): where an execbuf's time goes -- the import UPDATEs (the host re-reads every imported source,
+      whole), the stream itself, the target READBACKs; every 60 calls */
+   static unsigned r43_n, r43_up, r43_upn, r43_ex, r43_rb, r43_rbn, r43_max;
+   const unsigned r43_t0 = symgl_now_us();
+   unsigned r43_t1 = r43_t0, r43_t2 = r43_t0;
    if (a->command_size && V.import_stale) {   /* zero-copy imports: the host re-reads what the CPU wrote into the sources */
       struct cmdw w;
       cmd_begin(&w);
@@ -499,10 +504,13 @@ do_execbuf(const struct drm_vmw_execbuf_arg *a)
             SVGA3dCmdUpdateGBSurface *c = cmd_add(&w, SVGA_3D_CMD_UPDATE_GB_SURFACE, sizeof(*c));
             c->sid = V.info.surf_base + i;
          }
-      if (w.bytes)
+      if (w.bytes) {
          cmd_run(&w, SVGA3D_INVALID_ID, "import update");
+         r43_upn += w.bytes / 16;
+      }
       V.import_stale = 0;
    }
+   r43_t1 = symgl_now_us();
    if (a->command_size) {
       struct cmdw w;
       cmd_begin(&w);
@@ -510,6 +518,7 @@ do_execbuf(const struct drm_vmw_execbuf_arg *a)
       w.bytes = a->command_size;
       const uint32_t cid = a->version > 1 ? a->context_handle : SVGA3D_INVALID_ID;
       cmd_run(&w, cid, "execbuf");   /* (an error in the stream is the stream's: vmwgfx does not fail the ioctl either) */
+      r43_t2 = symgl_now_us();
       cmd_begin(&w);               /* zero-copy imports the GPU draws into: their guest pages get the host's pixels */
       for (uint32_t i = 0; i < V.surf_high && w.bytes + 16 <= V.arena_bytes; i++)
          if (V.surfs[i].imported && V.surfs[i].target && !V.surfs[i].shown) {
@@ -520,6 +529,20 @@ do_execbuf(const struct drm_vmw_execbuf_arg *a)
       if (targets) {
          cmd_run(&w, SVGA3D_INVALID_ID, "import readback");
          V.import_stale = 1;   /* (a frame ended: the next one's sources are new) */
+      }
+   }
+   {
+      const unsigned t3 = symgl_now_us();
+      if (r43_t1 >= r43_t0 && t3 >= r43_t1) {
+         r43_up += r43_t1 - r43_t0;
+         if (r43_t2 >= r43_t1) { r43_ex += r43_t2 - r43_t1; r43_rb += t3 - r43_t2; }
+         if (t3 - r43_t0 > r43_max) r43_max = t3 - r43_t0;
+      }
+      r43_rbn += targets;
+      if (++r43_n == 60) {
+         vlog("[r43] execbuf x60: update %u us (%u surfaces) | stream %u us | readback %u us (%u targets) | max %u us (avg/call)",
+              r43_up / 60, r43_upn, r43_ex / 60, r43_rb / 60, r43_rbn, r43_max);
+         r43_n = r43_up = r43_upn = r43_ex = r43_rb = r43_rbn = r43_max = 0;
       }
    }
    if (rep) {
