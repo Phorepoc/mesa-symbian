@@ -469,6 +469,44 @@ PATCH["libsvga"]["svga_draw.c"] = [
      "   }\n"),
 ]
 
+# round 44 (test): where resource_rebind's ~1.25 ms per frame goes -- the reserve, the surface's relocation (hash
+# lookup + the mutex-guarded MOB relocation), the commit; the mutex wait alone; sums per 60 calls
+PATCH_R44 = [
+    ("#include \"vmw_query.h\"\n",
+     "#include \"vmw_query.h\"\nstatic unsigned ph_mtx;  /* OURS (round 44 test): the relocation's mutex wait */\n"
+     "unsigned symgl_now_us(void);\n"),
+    ("      mtx_lock(&vsurf->mutex);\n      assert(vsurf->buf != NULL);\n",
+     "      {  const unsigned m0 = symgl_now_us();\n"
+     "         mtx_lock(&vsurf->mutex);\n"
+     "         const unsigned m1 = symgl_now_us(); if (m1 >= m0) ph_mtx += m1 - m0; }  /* OURS (round 44 test) */\n"
+     "      assert(vsurf->buf != NULL);\n"),
+    ("   if (!vmw_swc_reserve(swc, 0, 1))\n      return PIPE_ERROR_OUT_OF_MEMORY;\n\n   if (surface)\n      vmw_swc_surface_relocation(swc, NULL, NULL, surface, flags);\n",
+     "   static unsigned r44_n, r44_res, r44_rel, r44_com, r44_max;  /* OURS (round 44 test) */\n"
+     "   const unsigned r44_t0 = symgl_now_us();\n"
+     "   if (!vmw_swc_reserve(swc, 0, 1))\n      return PIPE_ERROR_OUT_OF_MEMORY;\n\n"
+     "   const unsigned r44_t1 = symgl_now_us();\n"
+     "   if (surface)\n      vmw_swc_surface_relocation(swc, NULL, NULL, surface, flags);\n"),
+    ("      vmw_swc_shader_relocation(swc, NULL, NULL, NULL, shader, flags);\n\n   vmw_swc_commit(swc);\n\n   return PIPE_OK;\n",
+     "      vmw_swc_shader_relocation(swc, NULL, NULL, NULL, shader, flags);\n\n"
+     "   const unsigned r44_t2 = symgl_now_us();\n"
+     "   vmw_swc_commit(swc);\n"
+     "   {  /* OURS (round 44 test) */\n"
+     "      const unsigned t3 = symgl_now_us();\n"
+     "      if (r44_t1 >= r44_t0 && r44_t2 >= r44_t1 && t3 >= r44_t2) {\n"
+     "         r44_res += r44_t1 - r44_t0; r44_rel += r44_t2 - r44_t1; r44_com += t3 - r44_t2;\n"
+     "         if (t3 - r44_t0 > r44_max) r44_max = t3 - r44_t0;\n"
+     "      }\n"
+     "      if (++r44_n == 60) {\n"
+     "         char m[200];\n"
+     "         snprintf(m, sizeof(m), \"[symgl] r44 rebind x60 (sum us): reserve %u relocation %u (mutex %u) commit %u | max %u\",\n"
+     "                  r44_res, r44_rel, ph_mtx, r44_com, r44_max);\n"
+     "         symgl_log(m);\n"
+     "         r44_n = r44_res = r44_rel = r44_com = r44_max = ph_mtx = 0;\n"
+     "      }\n"
+     "   }\n"
+     "\n   return PIPE_OK;\n"),
+]
+
 # round 42i: why every draw flushes (vmw_swc_reserve refuses -> SVGA_RETRY flushes): count the refusals by cause (the
 # preemptive flush by trigger kind / a full command or relocation list), every 60; and the region trigger's limit:
 # upstream's 16 MB/5 is the Linux kernel's GMR pool, and one 720x1280 source (3.69 MB) passes it on every draw -- here
@@ -506,6 +544,7 @@ PATCH["libsvgadrm"]["vmw_context.c"] = [
      "   }\n"
      "   if (vswc->preemptive_flush ||\n      vswc->command.used + nr_bytes > vswc->command.size ||\n"),
 ]
+PATCH["libsvgadrm"]["vmw_context.c"] += PATCH_R44
 
 # round 42j (test): 42i showed no refused reserve, yet a texture rebind (= a context flush) before every draw: WHO
 # flushes. svga_context_flush becomes a macro passing its call site; every 60 flushes, the sites by count
