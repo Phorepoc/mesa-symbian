@@ -510,6 +510,38 @@ PATCH_R44 = [
      "\n   return PIPE_OK;\n"),
 ]
 
+# round 46 (test): who holds a surface's mutex -- vmw_svga_winsys_surface_map holds it from the lock to out_unlock,
+# across vmw_svga_winsys_buffer_map (a possible wait); per 60 maps: the hold time, the buffer map alone, by map mode
+PATCH_R46 = [
+    ("#include \"pipebuffer/pb_bufmgr.h\"\n",
+     "#include \"pipebuffer/pb_bufmgr.h\"\n"
+     "unsigned symgl_now_us(void);\nvoid symgl_log(const char *);\n#include <stdio.h>\n"
+     "static unsigned r46_n, r46_hold, r46_bm, r46_max, r46_rd, r46_wr, r46_bmn;  /* OURS (round 46 test) */\n"
+     "static unsigned r46_t0, r46_mode;\n"),
+    ("   mtx_lock(&vsrf->mutex);\n\n   if (vsrf->mapcount) {",
+     "   mtx_lock(&vsrf->mutex);\n   r46_t0 = symgl_now_us(); r46_mode = flags;  /* OURS (round 46 test) */\n\n   if (vsrf->mapcount) {"),
+    ("   pb_flags |= (flags & PIPE_MAP_DONTBLOCK);\n   data = vmw_svga_winsys_buffer_map(&vws->base, vsrf->buf, pb_flags);\n",
+     "   pb_flags |= (flags & PIPE_MAP_DONTBLOCK);\n"
+     "   {  const unsigned b0 = symgl_now_us();  /* OURS (round 46 test) */\n"
+     "      data = vmw_svga_winsys_buffer_map(&vws->base, vsrf->buf, pb_flags);\n"
+     "      const unsigned b1 = symgl_now_us(); if (b1 >= b0) r46_bm += b1 - b0; ++r46_bmn; }\n"),
+    ("out_unlock:\n   mtx_unlock(&vsrf->mutex);\n   return data;\n}",
+     "out_unlock:\n"
+     "   {  /* OURS (round 46 test) */\n"
+     "      const unsigned t = symgl_now_us();\n"
+     "      if (t >= r46_t0) { r46_hold += t - r46_t0; if (t - r46_t0 > r46_max) r46_max = t - r46_t0; }\n"
+     "      if (r46_mode & PIPE_MAP_WRITE) ++r46_wr; else ++r46_rd;\n"
+     "      if (++r46_n == 60) {\n"
+     "         char m[200];\n"
+     "         snprintf(m, sizeof(m), \"[symgl] r46 surface map x60: held %u us (max %u) | buffer map %u us in %u | read %u write %u\",\n"
+     "                  r46_hold, r46_max, r46_bm, r46_bmn, r46_rd, r46_wr);\n"
+     "         symgl_log(m);\n"
+     "         r46_n = r46_hold = r46_max = r46_bm = r46_bmn = r46_rd = r46_wr = 0;\n"
+     "      }\n"
+     "   }\n"
+     "   mtx_unlock(&vsrf->mutex);\n   return data;\n}"),
+]
+
 # round 42i: why every draw flushes (vmw_swc_reserve refuses -> SVGA_RETRY flushes): count the refusals by cause (the
 # preemptive flush by trigger kind / a full command or relocation list), every 60; and the region trigger's limit:
 # upstream's 16 MB/5 is the Linux kernel's GMR pool, and one 720x1280 source (3.69 MB) passes it on every draw -- here
@@ -548,6 +580,7 @@ PATCH["libsvgadrm"]["vmw_context.c"] = [
      "   if (vswc->preemptive_flush ||\n      vswc->command.used + nr_bytes > vswc->command.size ||\n"),
 ]
 PATCH["libsvgadrm"]["vmw_context.c"] += PATCH_R44
+PATCH["libsvgadrm"].setdefault("vmw_surface.c", []).extend(PATCH_R46)
 
 # round 42j (test): 42i showed no refused reserve, yet a texture rebind (= a context flush) before every draw: WHO
 # flushes. svga_context_flush becomes a macro passing its call site; every 60 flushes, the sites by count
