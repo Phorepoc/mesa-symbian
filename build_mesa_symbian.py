@@ -699,7 +699,7 @@ MIRROR = {"libsoftpipe": "src/gallium/drivers/softpipe",
 
 # OURS sources added to a library (compiled with that library's include dirs + macros)
 EXTRA = {
-    "libmesa_util": ["posix_extra.c", "cxx_extra.cpp", "phe_mutex.cpp"],
+    "libmesa_util": ["posix_extra.c", "cxx_extra.cpp", "phe_mutex.c"],
     "libsvgadrm": ["vmw_msg_symbian.c", "vmw_screen_symbian.c"],
 }
 
