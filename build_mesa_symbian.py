@@ -473,14 +473,24 @@ PATCH["libsvga"]["svga_draw.c"] = [
 # lookup + the mutex-guarded MOB relocation), the commit; the mutex wait alone; sums per 60 calls
 PATCH_R44 = [
     ("#include \"vmw_query.h\"\n",
-     "#include \"vmw_query.h\"\nstatic unsigned ph_mtx, ph_busy, ph_busy_us;  /* OURS (round 44 test): the relocation's mutex wait */\n"
-     "unsigned symgl_now_us(void);\n"),
+     "#include \"vmw_query.h\"\nstatic unsigned ph_mtx, ph_busy, ph_busy_us, ph_ev;  /* OURS (round 44 test): the relocation's mutex wait */\n"
+     "unsigned symgl_now_us(void);\n"
+     "#include <string.h>\n#include \"c11/threads.h\"\n"
+     "/* OURS (round 47 test): which thread holds a surface's mutex when the compositor finds it taken */\n"
+     "static unsigned ph_tid(void) { thrd_t t = thrd_current(); unsigned v = 0; memcpy(&v, &t, sizeof(v) < sizeof(t) ? sizeof(v) : sizeof(t)); return v; }\n"
+     "static const void *ph_hs[8]; static unsigned ph_ht[8];\n"
+     "static unsigned ph_holder(const void *v) { for (int i = 0; i < 8; i++) if (ph_hs[i] == v) return ph_ht[i]; return 0; }\n"
+     "static void ph_hold(const void *v, unsigned t) { int f = -1; for (int i = 0; i < 8; i++) { if (ph_hs[i] == v) { ph_ht[i] = t; return; } if (f < 0 && !ph_hs[i]) f = i; } if (f < 0) f = (int)(((unsigned)(size_t)v >> 4) & 7); ph_hs[f] = v; ph_ht[f] = t; }\n"),
     ("      mtx_lock(&vsurf->mutex);\n      assert(vsurf->buf != NULL);\n",
      "      {  const unsigned m0 = symgl_now_us();\n"
      "         if (mtx_trylock(&vsurf->mutex) != thrd_success) {  /* OURS (round 45 test): held by another thread */\n"
-     "            ++ph_busy; mtx_lock(&vsurf->mutex);\n"
+     "            ++ph_busy;\n"
+     "            const unsigned who = ph_holder(vsurf);\n"
+     "            mtx_lock(&vsurf->mutex);\n"
+     "            if (ph_ev < 24) { char m[160]; ++ph_ev; snprintf(m, sizeof(m), \"[symgl] r47 surface %p was held: me tid %u, holder tid %u\", (void *)vsurf, ph_tid(), who); symgl_log(m); }\n"
      "            const unsigned mb = symgl_now_us(); if (mb >= m0) ph_busy_us += mb - m0;\n"
      "         }\n"
+     "         ph_hold(vsurf, ph_tid());\n"
      "         const unsigned m1 = symgl_now_us(); if (m1 >= m0) ph_mtx += m1 - m0; }  /* OURS (round 44 test) */\n"
      "      assert(vsurf->buf != NULL);\n"),
     ("   if (!vmw_swc_reserve(swc, 0, 1))\n      return PIPE_ERROR_OUT_OF_MEMORY;\n\n   if (surface)\n      vmw_swc_surface_relocation(swc, NULL, NULL, surface, flags);\n",
